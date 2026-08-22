@@ -1,48 +1,69 @@
 import os
-import json
-import base64
 import re
-from datetime import datetime
-
-import pytz
-from curl_cffi import requests
+import json
+import time
+import datetime
 import gspread
+
 from google.oauth2.service_account import Credentials
+from playwright.sync_api import sync_playwright
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-SPREADSHEET_ID = os.environ.get(
-    "SPREADSHEET_ID",
-    "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
-)
+SPREADSHEET_ID = "YOUR_SPREADSHEET_ID"
 
-SHEET_TAB_NAME = "SeatLog"
+GOOGLE_CREDENTIALS_FILE = "credentials.json"
 
-GCP_SA_KEY = (
-    os.environ.get("GCP_SA_KEY_B64")
-    or os.environ.get("GCP_SA_KEY")
-)
+SHEET_NAME = "BMS_Data"
 
-# No proxy for this test.
-PROXY_URL = None
+BMS_URL = "https://in.bookmyshow.com/"
 
-
-# ============================================================
-# TOXIC TEST SESSION
-# ============================================================
-
-EVENT_CODE = "ET00379311"
-VENUE_CODE = "CSWO"
-SESSION_ID = "15925"
-SHOW_DATE = "20260826"
+TARGET_DATE = "20260826"
 CITY = "mumbai"
 
+# Optional event/session filters
+TARGET_EVENT_CODE = "ET00379311"
+TARGET_VENUE_CODE = "CSWO"
+TARGET_SESSION_ID = "15925"
+
 
 # ============================================================
-# GOOGLE SHEET
+# GOOGLE SHEETS
+# ============================================================
+
+def connect_google_sheet():
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    credentials = Credentials.from_service_account_file(
+        GOOGLE_CREDENTIALS_FILE,
+        scopes=scopes
+    )
+
+    client = gspread.authorize(credentials)
+
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+
+    try:
+        worksheet = spreadsheet.worksheet(SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=SHEET_NAME,
+            rows=10000,
+            cols=20
+        )
+
+    return worksheet
+
+
+# ============================================================
+# OUTPUT HEADERS
 # ============================================================
 
 HEADERS = [
@@ -59,226 +80,83 @@ HEADERS = [
     "Seat Token",
     "Seat Code",
     "Seat Number",
-    "BMS State",
-    "Raw Row"
+    "Available",
+    "Sold"
 ]
 
 
 # ============================================================
-# GOOGLE AUTHENTICATION
+# LAYOUT PARSER
 # ============================================================
 
-def init_google_sheet():
-
-    if not GCP_SA_KEY:
-        raise ValueError(
-            "Missing GCP_SA_KEY_B64 or GCP_SA_KEY GitHub Secret."
-        )
-
-    raw_key = GCP_SA_KEY.strip()
-
-    if raw_key.startswith("{"):
-        service_account_info = json.loads(raw_key)
-    else:
-        service_account_info = json.loads(
-            base64.b64decode(raw_key).decode("utf-8")
-        )
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-
-    credentials = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=scopes
-    )
-
-    client = gspread.authorize(credentials)
-
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-
-    try:
-        sheet = spreadsheet.worksheet(SHEET_TAB_NAME)
-    except gspread.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(
-            title=SHEET_TAB_NAME,
-            rows=10000,
-            cols=len(HEADERS)
-        )
-
-    # Add headers if sheet is empty
-    existing = sheet.get_all_values()
-
-    if not existing:
-        sheet.append_row(
-            HEADERS,
-            value_input_option="USER_ENTERED"
-        )
-
-    return sheet
-
-
-# ============================================================
-# BMS REQUEST
-# ============================================================
-
-def get_seat_layout():
-
-    url = "https://services-in.bookmyshow.com/doTrans.aspx"
-
-    payload = {
-        "strCommand": "GETSEATLAYOUT",
-        "strVenueCode": VENUE_CODE,
-        "strParam1": SESSION_ID,
-        "strParam2": "WEB",
-        "strParam5": "Y",
-        "strParam6": "Y",
-        "strParam7": "N",
-        "strFormat": "json"
-    }
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/151.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Origin": "https://in.bookmyshow.com",
-        "Referer": (
-            f"https://in.bookmyshow.com/"
-            f"buytickets/toxic-{CITY}/movie-mumbai-"
-            f"ET00379311-MT/"
-        )
-    }
-
-    print("=" * 70)
-    print("TOXIC BMS DIRECT SEAT TEST")
-    print("=" * 70)
-    print(f"Event:   {EVENT_CODE}")
-    print(f"Venue:   {VENUE_CODE}")
-    print(f"Session: {SESSION_ID}")
-    print(f"Date:    {SHOW_DATE}")
-    print(f"City:    {CITY}")
-    print("=" * 70)
-    print("BMS GETSEATLAYOUT")
-    print("=" * 70)
-    print("URL:")
-    print(url)
-    print()
-    print("PAYLOAD:")
-    print(payload)
-    print()
-    print("PROXY: DISABLED")
-    print("=" * 70)
-
-    try:
-
-        response = requests.post(
-            url,
-            data=payload,
-            headers=headers,
-            impersonate="chrome120",
-            timeout=30
-        )
-
-        print("HTTP STATUS:")
-        print(response.status_code)
-
-        print("RESPONSE SIZE:")
-        print(len(response.content))
-
-        print("=" * 70)
-        print("RESPONSE HEADERS")
-        print("=" * 70)
-
-        for key, value in response.headers.items():
-            print(f"{key}: {value}")
-
-        if response.status_code != 200:
-            print()
-            print("BMS REQUEST FAILED")
-            print(response.text[:2000])
-            return None
-
-        try:
-            data = response.json()
-        except Exception:
-            print()
-            print("Could not decode JSON.")
-            print(response.text[:3000])
-            return None
-
-        print("=" * 70)
-        print("JSON RESPONSE RECEIVED")
-        print("=" * 70)
-
-        bookmyshow = data.get("BookMyShow", {})
-
-        success = bookmyshow.get("blnSuccess")
-
-        print(f"blnSuccess: {success}")
-        print(f"intException: {bookmyshow.get('intException')}")
-        print(f"strException: {bookmyshow.get('strException')}")
-
-        str_data = bookmyshow.get("strData")
-
-        if not str_data:
-            print()
-            print("No strData field found.")
-            return None
-
-        print()
-        print("strData length:")
-        print(len(str_data))
-
-        print()
-        print("strData preview:")
-        print(str_data[:2000])
-
-        return str_data
-
-    except Exception as error:
-
-        print()
-        print("REQUEST ERROR:")
-        print(repr(error))
-
-        return None
-
-
-# ============================================================
-# CATEGORY INFORMATION
-# ============================================================
-
-def parse_categories(category_section):
-
+def parse_layout_row(raw_row):
     """
+    Parses a BMS layout row.
+
     Example:
 
-    RECLINER:A:0000000005:5:N:0|
-    PREMIUM:B:0000000002:4:N:0|
-    EXECUTIVE XL:C:0000000006:3:N:0|
-    EXECUTIVE:D:0000000003:2:N:0|
-    NORMAL:E:0000000001:1:N:0
+    2:L:B000:B1041+1:B1042+2:B1043+3:B0+0:B0
 
-    Returns:
+    Interpretation:
 
-    {
-        "A": "RECLINER",
-        "B": "PREMIUM",
-        "C": "EXECUTIVE XL",
-        "D": "EXECUTIVE",
-        "E": "NORMAL"
-    }
+    2:L
+        Row number = 2
+        Row name   = L
+
+    B1041+1
+        Seat Token  = B1041
+        Seat Number = 1
+
+    B1042+2
+        Seat Token  = B1042
+        Seat Number = 2
+
+    B1043+3
+        Seat Token  = B1043
+        Seat Number = 3
+
+    B0
+        No physical seat
     """
 
-    categories = {}
+    if not raw_row:
+        return []
 
-    parts = category_section.split("|")
+    # Remove escaped formatting if necessary
+    raw_row = raw_row.strip()
+
+    # --------------------------------------------------------
+    # Split first-level row structure
+    # --------------------------------------------------------
+
+    first_parts = raw_row.split(":", 3)
+
+    if len(first_parts) < 4:
+        return []
+
+    row_number = first_parts[0].strip()
+    row_name = first_parts[1].strip()
+    category_code = first_parts[2].strip()
+
+    seat_string = first_parts[3].strip()
+
+    # --------------------------------------------------------
+    # Category can sometimes contain additional layout data.
+    # We only care about the actual seat sequence.
+    # --------------------------------------------------------
+
+    seats = []
+
+    # Each seat is separated by +
+    #
+    # Example:
+    # B1041+1
+    # B1042+2
+    # B1043+3
+    #
+    # However the first seat can sometimes be represented
+    # differently, so we process each token carefully.
+    parts = seat_string.split("+")
 
     for part in parts:
 
@@ -287,285 +165,463 @@ def parse_categories(category_section):
         if not part:
             continue
 
-        pieces = part.split(":")
+        # ----------------------------------------------------
+        # Seat token can contain:
+        #
+        # B1042+2
+        #
+        # After splitting by + this becomes:
+        #
+        # B1042
+        # 2
+        #
+        # Therefore we handle the layout as alternating
+        # seat-token / seat-number values.
+        # ----------------------------------------------------
 
-        if len(pieces) < 2:
+    # Reparse using regex because + separates token/number
+    #
+    # Pattern:
+    #
+    # TOKEN + NUMBER
+    #
+    # Example:
+    # B1041+1
+    # B1042+2
+    #
+    # We capture the token and number together.
+
+    pattern = re.compile(
+        r'(?P<token>[A-Za-z]+\d+)\+(?P<number>\d+)'
+    )
+
+    matches = pattern.finditer(seat_string)
+
+    for match in matches:
+
+        seat_token = match.group("token")
+        seat_number = match.group("number")
+
+        # Ignore B0 / A0 / etc.
+        if seat_token.endswith("0"):
             continue
 
-        category_name = pieces[0].strip()
-        category_code = pieces[1].strip()
+        seats.append({
+            "row_number": row_number,
+            "row_name": row_name,
+            "category_code": category_code,
+            "seat_token": seat_token,
+            "seat_code": seat_token,
+            "seat_number": seat_number
+        })
 
-        if category_code:
-            categories[category_code] = category_name
-
-    return categories
+    return seats
 
 
 # ============================================================
-# SEAT ROW PARSER
+# PARSE COMPLETE RAW LAYOUT
 # ============================================================
 
-def parse_seat_rows(str_data):
+def parse_complete_layout(raw_layout):
 
-    """
-    BMS strData structure:
+    all_seats = []
 
-    CATEGORY SECTION
-    ||
-    ROW DATA
-    |
-    ROW DATA
-    |
-    ROW DATA
+    if not raw_layout:
+        return all_seats
 
-    Example:
+    # Rows are separated by |
+    rows = raw_layout.split("|")
 
-    1:M:A000:A0+0:A1052+1:A1053+2:A0+0...
-    """
-
-    timestamp = datetime.now(
-        pytz.timezone("Asia/Kolkata")
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-    # --------------------------------------------------------
-    # Split category section from seat section
-    # --------------------------------------------------------
-
-    sections = str_data.split("||", 1)
-
-    if len(sections) != 2:
-        print("Could not split category section from seat data.")
-        return []
-
-    category_section = sections[0]
-    seat_section = sections[1]
-
-    categories = parse_categories(category_section)
-
-    print()
-    print("CATEGORY MAP:")
-    print(categories)
-
-    # --------------------------------------------------------
-    # Split rows
-    # --------------------------------------------------------
-
-    raw_rows = seat_section.split("|")
-
-    results = []
-
-    for raw_row in raw_rows:
+    for raw_row in rows:
 
         raw_row = raw_row.strip()
 
         if not raw_row:
             continue
 
-        # ----------------------------------------------------
-        # Row format:
-        #
-        # 1:M:A000:A0+0:A1052+1:A1053...
-        #
-        # ----------------------------------------------------
+        parsed = parse_layout_row(raw_row)
 
-        row_parts = raw_row.split(":", 3)
+        all_seats.extend(parsed)
 
-        if len(row_parts) < 4:
+    return all_seats
+
+
+# ============================================================
+# BUILD SEAT MAP
+# ============================================================
+
+def build_seat_map(raw_layout):
+
+    seats = parse_complete_layout(raw_layout)
+
+    seat_map = {}
+
+    for seat in seats:
+
+        token = seat["seat_token"]
+
+        seat_map[token] = seat
+
+    return seat_map
+
+
+# ============================================================
+# STATUS PARSER
+# ============================================================
+
+def parse_status_token(status_token):
+    """
+    Converts status data such as:
+
+        1:B1042
+
+    or
+
+        2:B1043
+
+    into:
+
+        position = 1
+        seat_token = B1042
+
+    IMPORTANT:
+
+    The number before ':' is NOT the actual seat number.
+
+    Actual seat number comes from the layout:
+
+        B1042+2
+
+    """
+
+    if not status_token:
+        return None
+
+    status_token = status_token.strip()
+
+    match = re.match(
+        r'(?P<position>\d+):(?P<token>[A-Za-z]+\d+)$',
+        status_token
+    )
+
+    if not match:
+        return None
+
+    return {
+        "position": match.group("position"),
+        "seat_token": match.group("token")
+    }
+
+
+# ============================================================
+# STATUS CLASSIFICATION
+# ============================================================
+
+def classify_status(status):
+
+    if not status:
+        return None
+
+    status = status.strip().upper()
+
+    if status == "AVAILABLE":
+        return "AVAILABLE"
+
+    if status == "BOOKED":
+        return "SOLD"
+
+    # OTHER is deliberately ignored
+    return None
+
+
+# ============================================================
+# PROCESS SEAT DATA
+# ============================================================
+
+def process_seats(
+    raw_layout,
+    status_records,
+    timestamp,
+    event_code,
+    venue_code,
+    session_id,
+    date_value,
+    city
+):
+
+    # --------------------------------------------------------
+    # First create the authoritative physical seat map
+    # from the layout.
+    # --------------------------------------------------------
+
+    seat_map = build_seat_map(raw_layout)
+
+    results = []
+
+    # --------------------------------------------------------
+    # status_records expected format:
+    #
+    # [
+    #   {
+    #       "status_token": "1:B1042",
+    #       "status": "AVAILABLE"
+    #   },
+    #   {
+    #       "status_token": "2:B1043",
+    #       "status": "BOOKED"
+    #   }
+    # ]
+    # --------------------------------------------------------
+
+    for record in status_records:
+
+        status_token = record.get("status_token")
+        status = record.get("status")
+
+        parsed_status = parse_status_token(status_token)
+
+        if not parsed_status:
             continue
 
-        row_number = row_parts[0]
-        row_name = row_parts[1]
-        category_code = row_parts[2]
-        seat_data = row_parts[3]
-
-        category = categories.get(
-            category_code,
-            category_code
-        )
+        seat_token = parsed_status["seat_token"]
 
         # ----------------------------------------------------
-        # Split individual seats
-        #
-        # Example:
-        #
-        # A0+0
-        # A1052+1
-        # A1053+2
-        #
+        # Only accept seats that actually exist in layout.
         # ----------------------------------------------------
 
-        seat_tokens = seat_data.split("+")
+        if seat_token not in seat_map:
+            continue
 
-        for i in range(0, len(seat_tokens) - 1, 2):
+        seat = seat_map[seat_token]
 
-            seat_code = seat_tokens[i].strip()
-            state_text = seat_tokens[i + 1].strip()
+        classification = classify_status(status)
 
-            if not seat_code:
-                continue
+        # Ignore OTHER and any unknown status
+        if classification is None:
+            continue
 
-            # -----------------------------------------------
-            # Ignore special row markers
-            # -----------------------------------------------
+        available = 1 if classification == "AVAILABLE" else 0
+        sold = 1 if classification == "SOLD" else 0
 
-            if seat_code == "A000":
-                continue
+        results.append([
+            timestamp,
+            event_code,
+            venue_code,
+            session_id,
+            date_value,
+            city,
 
-            # -----------------------------------------------
-            # State should be numeric
-            # -----------------------------------------------
+            seat["row_number"],
+            seat["row_name"],
+            seat["category_code"],
+            seat["category_code"],
 
-            try:
-                bms_state = int(state_text)
-            except ValueError:
-                bms_state = state_text
+            seat["seat_token"],
+            seat["seat_code"],
 
-            # -----------------------------------------------
-            # Seat number
+            # IMPORTANT:
+            # Actual seat number comes from:
             #
-            # A1052 -> 1052
-            # B1043 -> 1043
-            # D10216 -> 10216
+            # B1042+2
             #
-            # -----------------------------------------------
+            # therefore = 2
+            #
+            seat["seat_number"],
 
-            seat_match = re.search(
-                r"^[A-Za-z]+(.+)$",
-                seat_code
-            )
-
-            if seat_match:
-                seat_number = seat_match.group(1)
-            else:
-                seat_number = ""
-
-            # -----------------------------------------------
-            # Seat token
-            # -----------------------------------------------
-
-            seat_token = f"{state_text}:{seat_code}"
-
-            results.append([
-                timestamp,
-                EVENT_CODE,
-                VENUE_CODE,
-                SESSION_ID,
-                SHOW_DATE,
-                CITY,
-                row_number,
-                row_name,
-                category_code,
-                category,
-                seat_token,
-                seat_code,
-                seat_number,
-                bms_state,
-                raw_row
-            ])
+            available,
+            sold
+        ])
 
     return results
 
 
 # ============================================================
-# PRINT SAMPLE
+# DEDUPLICATE
 # ============================================================
 
-def print_sample(rows):
+def deduplicate_rows(rows):
 
-    print()
-    print("=" * 70)
-    print("PARSED SEAT SAMPLE")
-    print("=" * 70)
+    unique = {}
 
-    print(
-        "Timestamp | Row | Category | Seat Token | "
-        "Seat Code | Seat Number | BMS State"
-    )
+    for row in rows:
 
-    print("-" * 70)
-
-    for row in rows[:30]:
-
-        print(
-            f"{row[0]} | "
-            f"{row[6]} | "
-            f"{row[9]} | "
-            f"{row[10]} | "
-            f"{row[11]} | "
-            f"{row[12]} | "
-            f"{row[13]}"
+        # Seat uniquely identified by event/session + seat token
+        key = (
+            row[1],   # Event
+            row[2],   # Venue
+            row[3],   # Session
+            row[10]   # Seat token
         )
 
-    print()
-    print(f"TOTAL PARSED SEATS: {len(rows)}")
+        unique[key] = row
+
+    return list(unique.values())
 
 
 # ============================================================
-# GOOGLE SHEET WRITE
+# WRITE TO GOOGLE SHEETS
 # ============================================================
 
-def write_to_sheet(sheet, rows):
+def write_to_sheet(worksheet, rows):
 
     if not rows:
         print("No rows to write.")
         return
 
-    print()
-    print("=" * 70)
-    print("UPDATING GOOGLE SHEET")
-    print("=" * 70)
+    rows = deduplicate_rows(rows)
 
-    sheet.append_rows(
-        rows,
-        value_input_option="USER_ENTERED"
+    # Clear existing data
+    worksheet.clear()
+
+    # Header
+    worksheet.update(
+        "A1",
+        [HEADERS]
     )
 
-    print(
-        f"Google Sheet updated successfully. "
-        f"{len(rows)} seats written."
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    str_data = get_seat_layout()
-
-    if not str_data:
-        print()
-        print("=" * 70)
-        print("TEST FAILED - NO SEAT DATA")
-        print("=" * 70)
-        return
-
-    rows = parse_seat_rows(str_data)
-
-    if not rows:
-
-        print()
-        print("=" * 70)
-        print("NO SEATS PARSED")
-        print("=" * 70)
-
-        return
-
-    print_sample(rows)
-
-    sheet = init_google_sheet()
-
-    write_to_sheet(
-        sheet,
+    # Data
+    worksheet.update(
+        "A2",
         rows
     )
 
-    print()
-    print("=" * 70)
-    print("TEST FINISHED")
-    print("=" * 70)
+    print(f"Written {len(rows)} seat records.")
 
+
+# ============================================================
+# EXAMPLE BMS RESPONSE PROCESSOR
+# ============================================================
+
+def process_bms_response(
+    raw_layout,
+    bms_response,
+    event_code,
+    venue_code,
+    session_id,
+    date_value,
+    city
+):
+
+    """
+    bms_response should contain the status for each seat.
+
+    Example:
+
+    [
+        {
+            "status_token": "1:B1042",
+            "status": "AVAILABLE"
+        },
+        {
+            "status_token": "2:B1043",
+            "status": "BOOKED"
+        },
+        {
+            "status_token": "3:B1046",
+            "status": "OTHER"
+        }
+    ]
+
+    Result:
+
+    B1042 -> seat number obtained from layout B1042+2
+    B1043 -> seat number obtained from layout B1043+3
+    B1046 -> ignored because OTHER
+    """
+
+    timestamp = datetime.datetime.now(
+        datetime.timezone(
+            datetime.timedelta(hours=5, minutes=30)
+        )
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = process_seats(
+        raw_layout=raw_layout,
+        status_records=bms_response,
+        timestamp=timestamp,
+        event_code=event_code,
+        venue_code=venue_code,
+        session_id=session_id,
+        date_value=date_value,
+        city=city
+    )
+
+    return rows
+
+
+# ============================================================
+# TEST WITH YOUR BMS DATA
+# ============================================================
 
 if __name__ == "__main__":
-    main()
+
+    # --------------------------------------------------------
+    # Example layout from your BMS response
+    # --------------------------------------------------------
+
+    RAW_LAYOUT = (
+        "2:L:B000:"
+        "B1041+1:"
+        "B1042+2:"
+        "B1043+3:"
+        "B0+0:"
+        "B0+0:"
+        "B1046+4:"
+        "B1047+5:"
+        "B1048+6:"
+        "B1049+7:"
+        "B10410+8:"
+        "B10411+9:"
+        "B10412+10:"
+        "B10413+11:"
+        "B10414+12:"
+        "B10415+13:"
+        "B10416+14"
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # In your actual BMS raw row, this is normally one
+    # continuous string.
+    #
+    # Example:
+    #
+    # 2:L:B000:B1041+1:B1042+2:B1043+3:B0...
+    #
+    # If your actual data uses ':' differently, the parser
+    # below should receive the original raw row exactly.
+    # --------------------------------------------------------
+
+    STATUS_RECORDS = [
+        {
+            "status_token": "1:B1042",
+            "status": "AVAILABLE"
+        },
+        {
+            "status_token": "2:B1043",
+            "status": "BOOKED"
+        },
+        {
+            "status_token": "4:B1046",
+            "status": "OTHER"
+        }
+    ]
+
+    print("Testing BMS seat parser...")
+
+    rows = process_bms_response(
+        raw_layout=RAW_LAYOUT,
+        bms_response=STATUS_RECORDS,
+        event_code=TARGET_EVENT_CODE,
+        venue_code=TARGET_VENUE_CODE,
+        session_id=TARGET_SESSION_ID,
+        date_value=TARGET_DATE,
+        city=CITY
+    )
+
+    for row in rows:
+        print(row)
+
+    print()
+    print("Done.")
