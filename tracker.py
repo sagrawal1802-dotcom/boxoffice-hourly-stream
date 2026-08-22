@@ -7,7 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- CONFIGURATION ---
-SPREADSHEET_ID = "/1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4/"
+SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 SHEET_TAB_NAME = "HourlyLog"
 
 # BMS standard city codes
