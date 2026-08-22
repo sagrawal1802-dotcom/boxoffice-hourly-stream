@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
 SPREADSHEET_ID = os.environ.get(
@@ -23,21 +23,21 @@ GCP_SA_KEY = (
     or os.environ.get("GCP_SA_KEY")
 )
 
-PROXY_URL = os.environ.get("PROXY_URL")
+# IMPORTANT:
+# Proxy is deliberately NOT being used in this test.
+# We need to determine whether GitHub can reach BMS directly.
 
 SHEET_TAB_NAME = "Toxic_BMS_Raw"
 
 
 # ============================================================
-# TOXIC TEST SHOW FROM HAR
+# TOXIC TEST SHOW
 # ============================================================
 
 EVENT_CODE = "ET00379311"
 VENUE_CODE = "CSWO"
 SESSION_ID = "15925"
-
 DATE_CODE = "20260826"
-
 CITY = "mumbai"
 
 
@@ -49,7 +49,7 @@ def get_google_sheet():
 
     if not GCP_SA_KEY:
         raise ValueError(
-            "GCP_SA_KEY_B64 / GCP_SA_KEY is missing"
+            "GCP_SA_KEY_B64 or GCP_SA_KEY is missing."
         )
 
     raw = GCP_SA_KEY.strip()
@@ -66,24 +66,18 @@ def get_google_sheet():
         "https://www.googleapis.com/auth/drive"
     ]
 
-    credentials = (
-        Credentials
-        .from_service_account_info(
-            service_account,
-            scopes=scopes
-        )
+    credentials = Credentials.from_service_account_info(
+        service_account,
+        scopes=scopes
     )
 
-    client = gspread.authorize(
-        credentials
-    )
+    client = gspread.authorize(credentials)
 
     spreadsheet = client.open_by_key(
         SPREADSHEET_ID
     )
 
     try:
-
         sheet = spreadsheet.worksheet(
             SHEET_TAB_NAME
         )
@@ -106,8 +100,8 @@ def get_google_sheet():
             "HTTP Status",
             "Success",
             "Exception",
-            "Raw Data Length",
-            "Raw Data Preview"
+            "Response Length",
+            "Response Preview"
         ])
 
     return sheet
@@ -160,29 +154,31 @@ def get_seat_layout():
 
         "Referer": (
             "https://in.bookmyshow.com/"
-        )
+        ),
+
+        "Accept-Language": (
+            "en-IN,en;q=0.9"
+        ),
+
+        "Connection": "keep-alive"
     }
-
-    proxies = None
-
-    if PROXY_URL:
-
-        proxies = {
-            "http": PROXY_URL,
-            "https": PROXY_URL
-        }
 
     print()
     print("=" * 70)
     print("BMS GETSEATLAYOUT")
     print("=" * 70)
 
+    print()
     print("URL:")
     print(url)
 
     print()
     print("PAYLOAD:")
     print(payload)
+
+    print()
+    print("PROXY:")
+    print("DISABLED FOR THIS TEST")
 
     try:
 
@@ -194,8 +190,6 @@ def get_seat_layout():
 
             headers=headers,
 
-            proxies=proxies,
-
             impersonate="chrome120",
 
             timeout=30
@@ -204,42 +198,87 @@ def get_seat_layout():
     except Exception as e:
 
         print()
-        print("REQUEST ERROR:")
-        print(repr(e))
+        print("=" * 70)
+        print("REQUEST ERROR")
+        print("=" * 70)
+
+        print(
+            repr(e)
+        )
 
         return None
 
     print()
+    print("=" * 70)
+    print("BMS RESPONSE")
+    print("=" * 70)
+
+    print()
     print("HTTP STATUS:")
-    print(response.status_code)
+    print(
+        response.status_code
+    )
 
     print()
     print("RESPONSE SIZE:")
-    print(len(response.text))
+    print(
+        len(response.text)
+    )
+
+    print()
+    print("RESPONSE HEADERS:")
+
+    for key, value in response.headers.items():
+
+        print(
+            f"{key}: {value}"
+        )
 
     print()
     print("RESPONSE PREVIEW:")
-    print(response.text[:1000])
+
+    print(
+        response.text[:3000]
+    )
 
     return response
 
 
 # ============================================================
-# PROCESS RESPONSE
+# PROCESS BMS RESPONSE
 # ============================================================
 
 def process_response(response):
 
     if response is None:
-        return None
+
+        return {
+            "http_status": 0,
+            "success": False,
+            "exception": "No response received",
+            "raw_length": 0,
+            "preview": ""
+        }
 
     result = {
+
         "http_status": response.status_code,
+
         "success": False,
+
         "exception": "",
-        "raw_data_length": len(response.text),
-        "raw_data_preview": response.text[:500]
+
+        "raw_length": len(
+            response.text
+        ),
+
+        "preview": response.text[:500]
+
     }
+
+    # --------------------------------------------------------
+    # Try JSON
+    # --------------------------------------------------------
 
     try:
 
@@ -247,7 +286,7 @@ def process_response(response):
 
         print()
         print("=" * 70)
-        print("JSON RESPONSE")
+        print("JSON RESPONSE RECEIVED")
         print("=" * 70)
 
         print(
@@ -255,18 +294,26 @@ def process_response(response):
                 data,
                 indent=2,
                 ensure_ascii=False
-            )[:5000]
+            )[:10000]
         )
 
-        result["success"] = (
-            str(
-                data.get(
-                    "blnSuccess",
-                    ""
-                )
-            ).lower()
-            == "true"
+        # ----------------------------------------------------
+        # BMS success flag
+        # ----------------------------------------------------
+
+        success_value = data.get(
+            "blnSuccess"
         )
+
+        if str(
+            success_value
+        ).lower() == "true":
+
+            result["success"] = True
+
+        # ----------------------------------------------------
+        # Exception
+        # ----------------------------------------------------
 
         result["exception"] = str(
             data.get(
@@ -275,17 +322,25 @@ def process_response(response):
             )
         )
 
+        # ----------------------------------------------------
+        # strData
+        # ----------------------------------------------------
+
         if "strData" in data:
 
             raw_data = data["strData"]
 
             print()
+            print("=" * 70)
+            print("STRDATA FOUND")
+            print("=" * 70)
+
+            print()
             print(
-                "strData found!"
+                "strData length:"
             )
 
             print(
-                "strData length:",
                 len(raw_data)
             )
 
@@ -295,23 +350,30 @@ def process_response(response):
             )
 
             print(
-                raw_data[:1000]
+                raw_data[:3000]
             )
 
-            result["raw_data_length"] = len(
+            result["raw_length"] = len(
                 raw_data
             )
 
-            result["raw_data_preview"] = (
+            result["preview"] = (
                 raw_data[:500]
+            )
+
+        else:
+
+            print()
+            print(
+                "No strData field found."
             )
 
     except Exception as e:
 
         print()
-        print(
-            "Could not parse JSON:"
-        )
+        print("=" * 70)
+        print("JSON PARSE ERROR")
+        print("=" * 70)
 
         print(
             repr(e)
@@ -323,13 +385,10 @@ def process_response(response):
 
 
 # ============================================================
-# SAVE RESULT
+# SAVE RESULT TO GOOGLE SHEETS
 # ============================================================
 
 def save_result(result):
-
-    if not result:
-        return
 
     sheet = get_google_sheet()
 
@@ -341,7 +400,7 @@ def save_result(result):
         ist
     )
 
-    sheet.append_row([
+    row = [
 
         now.strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -363,15 +422,20 @@ def save_result(result):
 
         result["exception"],
 
-        result["raw_data_length"],
+        result["raw_length"],
 
-        result["raw_data_preview"]
+        result["preview"]
 
-    ], value_input_option="USER_ENTERED")
+    ]
+
+    sheet.append_row(
+        row,
+        value_input_option="USER_ENTERED"
+    )
 
     print()
     print(
-        "Result saved to Google Sheets."
+        "Google Sheet updated successfully."
     )
 
 
@@ -386,6 +450,7 @@ def main():
     print("TOXIC BMS DIRECT SEAT TEST")
     print("=" * 70)
 
+    print()
     print(
         "Event:",
         EVENT_CODE
@@ -399,6 +464,16 @@ def main():
     print(
         "Session:",
         SESSION_ID
+    )
+
+    print(
+        "Date:",
+        DATE_CODE
+    )
+
+    print(
+        "City:",
+        CITY
     )
 
     response = get_seat_layout()
