@@ -1,17 +1,17 @@
 import os
 import json
+import re
 import datetime
-from curl_cffi import requests
 import gspread
 from google.oauth2.service_account import Credentials
+from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 SHEET_TAB_NAME = "Palldium_26Aug"
 TARGET_DATE = "2026-08-26"
-CITY_NAME = "mumbai"
+TARGET_MOVIE = "Toxic: A Fairy Tale for Grown-ups"
 CINEMA_KEYWORD = "Palladium"
-TARGET_MOVIE = "Toxic"
 
 def calculate_occupancy(booked, total):
     if total == 0:
@@ -39,104 +39,94 @@ def run():
         ], value_input_option="USER_ENTERED")
 
     now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
-    session = requests.Session(impersonate="chrome120")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "client": "web"
-    }
-
+    
+    shows_data = []
     rows_to_append = []
 
-    print(f"2. Fetching showtimes from Paytm/District for {CITY_NAME} on {TARGET_DATE}...")
-    
-    # 1. Query city movies & cinema showtimes
-    catalog_url = f"https://apiproxy.paytm.com/v2/movies/shows?city={CITY_NAME}&date={TARGET_DATE}"
-    
-    try:
-        res = session.get(catalog_url, headers=headers, timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            cinemas = data.get("cinemas", []) or data.get("data", {}).get("cinemas", [])
-            movies_dict = {m["id"]: m.get("name", "") for m in data.get("movies", []) if "id" in m}
+    print(f"2. Launching District.in browser session for {TARGET_DATE}...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768}
+        )
+        page = context.new_page()
 
-            # Filter for PVR ICON Phoenix Palladium
-            target_cinemas = [c for c in cinemas if CINEMA_KEYWORD.lower() in c.get("name", "").lower()]
+        # Intercept District/Zomato API network payloads
+        def intercept_response(response):
+            if "json" in response.headers.get("content-type", "") and ("shows" in response.url or "movies" in response.url):
+                try:
+                    data = response.json()
+                    # Check for District's cinema schedule arrays
+                    cinemas = data.get("cinemas", []) or data.get("data", {}).get("cinemas", [])
+                    if cinemas:
+                        for cinema in cinemas:
+                            if CINEMA_KEYWORD.lower() in cinema.get("name", "").lower():
+                                for show in cinema.get("shows", []):
+                                    movie_name = show.get("movie_name") or data.get("movies", {}).get(show.get("movie_id"), {}).get("name", "")
+                                    if TARGET_MOVIE.lower() in movie_name.lower():
+                                        shows_data.append({
+                                            "cinema": cinema.get("name"),
+                                            "movie": movie_name,
+                                            "time": show.get("show_time", ""),
+                                            "format": f"{show.get('screen_format', '')} {show.get('language', '')}".strip(),
+                                            "audi": show.get("audi_name", "Audi"),
+                                            "session_id": show.get("session_id") or show.get("id"),
+                                            "areas": show.get("areas", [])
+                                        })
+                except Exception:
+                    pass
+
+        page.on("response", intercept_response)
+
+        try:
+            # Navigate to District Mumbai movies page with the target date query parameter
+            page.goto(f"https://www.district.in/movies/mumbai-movie-tickets?date={TARGET_DATE}", wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)
             
-            if not target_cinemas:
-                # If specific date isn't listed yet, check all Palladium shows
-                target_cinemas = cinemas
+            # Scroll to trigger lazy-loaded inventory
+            page.evaluate("window.scrollBy(0, 1500)")
+            page.wait_for_timeout(2000)
+            
+        except Exception as e:
+            print(f"Page load note: {e}")
 
-            for cinema in target_cinemas:
-                cinema_name = cinema.get("name", "PVR ICON Palladium")
-                if CINEMA_KEYWORD.lower() not in cinema_name.lower():
-                    continue
+        browser.close()
 
-                for show in cinema.get("shows", []):
-                    movie_id = show.get("movie_id") or show.get("movieId")
-                    movie_name = movies_dict.get(movie_id, show.get("movie_name", "Toxic"))
-                    
-                    # Filter for Toxic (case-insensitive)
-                    if TARGET_MOVIE.lower() not in movie_name.lower():
-                        continue
+    print(f"Discovered {len(shows_data)} matching shows for '{TARGET_MOVIE}' at {CINEMA_KEYWORD}.")
 
-                    session_id = show.get("session_id") or show.get("id")
-                    show_time = show.get("show_time") or show.get("time", "")
-                    format_lang = f"{show.get('screen_format', '')} {show.get('language', '')}".strip()
-                    audi = show.get("audi_name", "Audi")
+    # 3. Process Seat Availability
+    for show in shows_data:
+        total_seats = 0
+        booked_seats = 0
+        
+        # District embeds seat category limits directly in the show array
+        for area in show.get("areas", []):
+            capacity = int(area.get("total_seats", 0) or area.get("capacity", 0))
+            available = int(area.get("avail_seats", 0) or area.get("available", 0))
+            total_seats += capacity
+            booked_seats += max(0, capacity - available)
 
-                    total_seats = 0
-                    booked_seats = 0
+        avail_seats = max(0, total_seats - booked_seats)
+        occ_pct = calculate_occupancy(booked_seats, total_seats)
 
-                    # 2. Extract seat inventory layout
-                    if session_id:
-                        seat_url = f"https://apiproxy.paytm.com/v3/movies/seats?session_id={session_id}&city={CITY_NAME}"
-                        try:
-                            s_res = session.get(seat_url, headers=headers, timeout=8)
-                            if s_res.status_code == 200:
-                                s_json = s_res.json()
-                                # Calculate available vs occupied seats
-                                for row in s_json.get("seatLayout", {}).get("rows", []):
-                                    for seat in row.get("seats", []):
-                                        if seat.get("type", "").lower() != "space":
-                                            total_seats += 1
-                                            if seat.get("status", "").lower() in ["booked", "occupied", "unavailable", "sold"]:
-                                                booked_seats += 1
-                        except Exception as e:
-                            print(f"Error reading seat layout: {e}")
+        rows_to_append.append([
+            now_ist, TARGET_DATE, show["cinema"], show["movie"],
+            show["format"], show["audi"], show["time"],
+            total_seats, booked_seats, avail_seats, occ_pct
+        ])
+        print(f"-> {show['movie']} ({show['time']}) | Booked: {booked_seats}/{total_seats} ({occ_pct})")
 
-                    # Fallback to category level numbers if layout is blocked
-                    if total_seats == 0 and "areas" in show:
-                        for area in show.get("areas", []):
-                            tot = int(area.get("total_seats", 0))
-                            avail = int(area.get("avail_seats", 0))
-                            total_seats += tot
-                            booked_seats += max(0, tot - avail)
-
-                    avail_seats = max(0, total_seats - booked_seats)
-                    occ_pct = calculate_occupancy(booked_seats, total_seats)
-
-                    rows_to_append.append([
-                        now_ist, TARGET_DATE, cinema_name, movie_name,
-                        format_lang, audi, show_time, total_seats,
-                        booked_seats, avail_seats, occ_pct
-                    ])
-                    print(f"-> {movie_name} ({show_time}) | Booked: {booked_seats}/{total_seats} ({occ_pct})")
-
-        else:
-            print(f"Paytm API returned status: {res.status_code}")
-
-    except Exception as e:
-        print(f"Error querying Paytm/District: {e}")
-
-    # 3. Write rows to Google Sheets
+    # 4. Write to Google Sheets
     if rows_to_append:
         print(f"\n3. Writing {len(rows_to_append)} rows to Google Sheet...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
         print("Success! Google Sheet tab updated.")
     else:
-        print("No active show sessions found for the specified date and movie.")
+        print("No active advance shows found on District for this date. The theatre may not have pushed the schedule yet.")
 
 if __name__ == "__main__":
     run()
