@@ -2,11 +2,10 @@ import os
 import json
 import re
 import datetime
-from curl_cffi import requests
 import gspread
 from google.oauth2.service_account import Credentials
+from playwright.sync_api import sync_playwright
 
-# --- CONFIGURATION ---
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 
 def parse_tickets(raw_str):
@@ -37,94 +36,106 @@ def run():
     )
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    
-    # Target the very first worksheet directly to avoid tab name mismatch
     sheet = spreadsheet.get_worksheet(0)
 
-    # Ensure header row exists
+    # Ensure headers exist
     header = sheet.row_values(1)
     if not header or header[0] != "Timestamp (IST)":
         sheet.insert_row([
             "Timestamp (IST)", "Movie Title", "Event Code", 
-            "Language", "Tickets Sold (Last 1 Hr)", "Raw Status Text", "Scope"
+            "Tickets Sold (Last 1 Hr)", "Raw Status Text", "Scope"
         ], 1)
 
-    session = requests.Session(impersonate="chrome120")
-    unique_movies = {}
-
-    print("2. Fetching active movies from public catalog...")
-    
-    # Source A: Fast Catalog Endpoint
-    catalog_urls = [
-        "https://in.bookmyshow.com/serv/v2/explore/movies?region=MUMBAI",
-        "https://in.bookmyshow.com/serv/v2/explore/movies?region=NCR",
-        "https://in.bookmyshow.com/serv/v2/explore/movies?region=BANG"
-    ]
-    
-    for url in catalog_urls:
-        try:
-            res = session.get(url, timeout=12)
-            if res.status_code == 200:
-                data = res.json()
-                for item in data.get("movies", []):
-                    code = item.get("code") or item.get("eventCode")
-                    title = item.get("name") or item.get("title")
-                    lang = item.get("lang") or item.get("language") or ""
-                    if code and title and code not in unique_movies:
-                        unique_movies[code] = {"title": title, "lang": lang}
-        except Exception:
-            pass
-
-    # Source B: XML Sitemap Fallback (100% immune to anti-bot blocks)
-    if len(unique_movies) == 0:
-        print("Using public movie sitemap fallback...")
-        try:
-            sitemap_res = session.get("https://in.bookmyshow.com/sitemap/movies.xml", timeout=15)
-            if sitemap_res.status_code == 200:
-                matches = re.findall(r'<loc>https:\/\/in\.bookmyshow\.com\/movies\/[^\/]+\/([a-z0-9-]+)\/(ET\d{6,10})<\/loc>', sitemap_res.text)
-                for slug, code in matches[:35]: # Pick top 35 active listings
-                    title = slug.replace("-", " ").title()
-                    unique_movies[code] = {"title": title, "lang": ""}
-        except Exception as e:
-            print(f"Sitemap error: {e}")
-
-    print(f"Total movies found: {len(unique_movies)}")
-
     now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:00:00")
+    unique_movies = {}
     rows_to_append = []
 
-    print("3. Querying velocity counters...")
-    for code, meta in unique_movies.items():
-        tickets = 0
-        raw_text = "No Trending Badge"
-        
-        # Check details endpoint
+    print("2. Starting browser session...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage"
+            ]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768}
+        )
+        page = context.new_page()
+
+        # Step A: Discover active movies on the explore page
+        print("Discovering active movies on BookMyShow...")
         try:
-            d_res = session.get(f"https://in.bookmyshow.com/serv/v2/movies/{code}", timeout=8)
-            if d_res.status_code == 200:
-                details = d_res.json().get("movieDetails", {})
-                label = (
-                    details.get("bookingVelocity", {}).get("label") or
-                    details.get("recentBookings", {}).get("text") or
-                    details.get("trendingCount") or ""
-                )
-                if label:
-                    raw_text = str(label)
-                    tickets = parse_tickets(raw_text)
-        except Exception:
-            pass
+            page.goto("https://in.bookmyshow.com/explore/movies-mumbai", wait_until="networkidle", timeout=45000)
+            page.wait_for_timeout(3000)
 
-        rows_to_append.append([
-            now_ist, meta["title"], code, meta["lang"], tickets, raw_text, "All India"
-        ])
+            # Scroll down to load all dynamic cards
+            page.evaluate("window.scrollBy(0, 1500)")
+            page.wait_for_timeout(2000)
 
-    # 4. Append directly to Sheet
+            # Find all links containing movie slugs and event codes (ET00XXXXXX)
+            links = page.eval_on_selector_all(
+                "a[href*='/movies/']",
+                "elements => elements.map(el => el.href)"
+            )
+
+            for href in links:
+                match = re.search(r'/movies/[^/]+/([a-z0-9-]+)/(ET\d{6,10})', href, re.IGNORECASE)
+                if match:
+                    slug = match.group(1)
+                    code = match.group(2)
+                    if code not in unique_movies:
+                        title = slug.replace("-", " ").title()
+                        unique_movies[code] = {
+                            "title": title,
+                            "url": href,
+                            "code": code
+                        }
+        except Exception as e:
+            print(f"Error while browsing catalog: {e}")
+
+        print(f"Discovered {len(unique_movies)} active movies.")
+
+        # Step B: Visit each movie to check for hourly trending booking badges
+        for code, meta in unique_movies.items():
+            tickets = 0
+            raw_text = "No Trending Badge"
+
+            try:
+                page.goto(meta["url"], wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2000)
+                body_text = page.inner_text("body")
+
+                # Match patterns like: "15.2K tickets bought in last 1 hour", "850 booked in last 1 hr", "trending"
+                v_match = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)\s*(?:in\s+last|in\s+the\s+last)?\s*1\s*(?:hour|hr)', body_text, re.IGNORECASE)
+                if not v_match:
+                    v_match = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)', body_text, re.IGNORECASE)
+
+                if v_match:
+                    raw_text = v_match.group(0)
+                    tickets = parse_tickets(v_match.group(1))
+
+            except Exception as e:
+                print(f"Error checking {meta['title']}: {e}")
+
+            rows_to_append.append([
+                now_ist, meta["title"], code, tickets, raw_text, "All India"
+            ])
+            print(f"-> {meta['title']}: {tickets} ({raw_text})")
+
+        browser.close()
+
+    # Step C: Write to Google Sheet
     if rows_to_append:
-        print(f"Writing {len(rows_to_append)} rows to Google Sheets...")
+        print(f"\nWriting {len(rows_to_append)} rows to Google Sheets...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        print("Success! Google Sheet updated.")
+        print("Success! Google Sheet has been populated.")
     else:
-        print("No rows generated.")
+        print("No movie rows generated.")
 
 if __name__ == "__main__":
     run()
