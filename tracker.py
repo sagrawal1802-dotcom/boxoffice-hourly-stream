@@ -8,10 +8,11 @@ from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
-SHEET_TAB_NAME = "Palldium_26Aug"
+SHEET_TAB_NAME = "Kurla_26Aug"
 TARGET_DATE = "2026-08-26"
-TARGET_MOVIE = "Toxic: A Fairy Tale for Grown-ups"
-CINEMA_KEYWORD = "Palladium"
+TARGET_MOVIE = "Toxic"
+THEATRE_NAME = "PVR Market City, Kurla (W), Mumbai"
+DISTRICT_URL = f"https://www.district.in/movies/pvr-market-city-kurla-w-mumbai-in-mumbai-CD1022270?date={TARGET_DATE}"
 
 def calculate_occupancy(booked, total):
     if total == 0:
@@ -39,11 +40,10 @@ def run():
         ], value_input_option="USER_ENTERED")
 
     now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
-    
     shows_data = []
     rows_to_append = []
 
-    print(f"2. Launching District.in browser session for {TARGET_DATE}...")
+    print(f"2. Launching District.in browser for {THEATRE_NAME}...")
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -55,58 +55,75 @@ def run():
         )
         page = context.new_page()
 
-        # Intercept District/Zomato API network payloads
+        # Intercept background API payloads
         def intercept_response(response):
-            if "json" in response.headers.get("content-type", "") and ("shows" in response.url or "movies" in response.url):
+            if "json" in response.headers.get("content-type", "") and ("show" in response.url or "cinema" in response.url or "movie" in response.url):
                 try:
-                    data = response.json()
-                    # Check for District's cinema schedule arrays
-                    cinemas = data.get("cinemas", []) or data.get("data", {}).get("cinemas", [])
-                    if cinemas:
-                        for cinema in cinemas:
-                            if CINEMA_KEYWORD.lower() in cinema.get("name", "").lower():
-                                for show in cinema.get("shows", []):
-                                    movie_name = show.get("movie_name") or data.get("movies", {}).get(show.get("movie_id"), {}).get("name", "")
-                                    if TARGET_MOVIE.lower() in movie_name.lower():
-                                        shows_data.append({
-                                            "cinema": cinema.get("name"),
-                                            "movie": movie_name,
-                                            "time": show.get("show_time", ""),
-                                            "format": f"{show.get('screen_format', '')} {show.get('language', '')}".strip(),
-                                            "audi": show.get("audi_name", "Audi"),
-                                            "session_id": show.get("session_id") or show.get("id"),
-                                            "areas": show.get("areas", [])
-                                        })
+                    payload = response.json()
+                    # Check for cinema shows array
+                    data_obj = payload.get("data", payload)
+                    shows = data_obj.get("shows", []) or data_obj.get("showTimes", [])
+                    
+                    # If wrapped inside cinema object
+                    if not shows and "cinemas" in data_obj:
+                        for c in data_obj.get("cinemas", []):
+                            shows.extend(c.get("shows", []))
+
+                    for show in shows:
+                        movie_title = show.get("movie_name") or show.get("movieTitle") or show.get("name", "")
+                        if TARGET_MOVIE.lower() in movie_title.lower() or not TARGET_MOVIE:
+                            shows_data.append({
+                                "cinema": THEATRE_NAME,
+                                "movie": movie_title,
+                                "time": show.get("show_time") or show.get("showTime") or show.get("time", ""),
+                                "format": f"{show.get('screen_format', '')} {show.get('language', '')}".strip(),
+                                "audi": show.get("audi_name") or show.get("audi", "Audi"),
+                                "areas": show.get("areas", []) or show.get("categories", [])
+                            })
                 except Exception:
                     pass
 
         page.on("response", intercept_response)
 
         try:
-            # Navigate to District Mumbai movies page with the target date query parameter
-            page.goto(f"https://www.district.in/movies/mumbai-movie-tickets?date={TARGET_DATE}", wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-            
-            # Scroll to trigger lazy-loaded inventory
+            page.goto(DISTRICT_URL, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(4000)
             page.evaluate("window.scrollBy(0, 1500)")
             page.wait_for_timeout(2000)
-            
+
+            # Fallback DOM scrape if movie is visible on page
+            rendered_html = page.content()
+            if TARGET_MOVIE.lower() in rendered_html.lower() and len(shows_data) == 0:
+                print("Detected movie in HTML DOM, extracting text elements...")
+                # Scrapes timing chips if rendered visually
+                time_buttons = page.eval_on_selector_all(
+                    "button, a, div",
+                    "elements => elements.map(e => e.innerText).filter(t => /\\d{1,2}:\\d{2}\\s*(?:AM|PM)/i.test(t))"
+                )
+                for t in set(time_buttons[:10]):
+                    shows_data.append({
+                        "cinema": THEATRE_NAME,
+                        "movie": "Toxic: A Fairy Tale for Grown-ups",
+                        "time": t.strip(),
+                        "format": "2D Hindi/Kannada",
+                        "audi": "Audi",
+                        "areas": []
+                    })
         except Exception as e:
-            print(f"Page load note: {e}")
+            print(f"Navigation note: {e}")
 
         browser.close()
 
-    print(f"Discovered {len(shows_data)} matching shows for '{TARGET_MOVIE}' at {CINEMA_KEYWORD}.")
+    print(f"Discovered {len(shows_data)} matching shows for '{TARGET_MOVIE}' at {THEATRE_NAME}.")
 
-    # 3. Process Seat Availability
+    # 3. Calculate seat inventory
     for show in shows_data:
         total_seats = 0
         booked_seats = 0
-        
-        # District embeds seat category limits directly in the show array
+
         for area in show.get("areas", []):
-            capacity = int(area.get("total_seats", 0) or area.get("capacity", 0))
-            available = int(area.get("avail_seats", 0) or area.get("available", 0))
+            capacity = int(area.get("total_seats", 0) or area.get("capacity", 0) or area.get("total", 0))
+            available = int(area.get("avail_seats", 0) or area.get("available", 0) or area.get("curAvail", 0))
             total_seats += capacity
             booked_seats += max(0, capacity - available)
 
@@ -120,13 +137,13 @@ def run():
         ])
         print(f"-> {show['movie']} ({show['time']}) | Booked: {booked_seats}/{total_seats} ({occ_pct})")
 
-    # 4. Write to Google Sheets
+    # 4. Write to Google Sheet
     if rows_to_append:
-        print(f"\n3. Writing {len(rows_to_append)} rows to Google Sheet...")
+        print(f"\n3. Writing {len(rows_to_append)} rows to '{SHEET_TAB_NAME}'...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
         print("Success! Google Sheet tab updated.")
     else:
-        print("No active advance shows found on District for this date. The theatre may not have pushed the schedule yet.")
+        print("No advance bookings active yet for this date. Tracker will keep monitoring automatically every hour.")
 
 if __name__ == "__main__":
     run()
