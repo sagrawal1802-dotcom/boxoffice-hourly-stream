@@ -8,36 +8,17 @@ from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 
 SHEET_TAB_NAME = "Toxic_26Aug"
 
-BFILMY_URL = "https://bfilmy.pages.dev/District%20Advance/"
+URL = "https://bfilmy.pages.dev/District%20Advance/"
 
 TARGET_DATE = "2026-08-26"
 
-TARGET_MOVIE = "Toxic"
+RAW_FILE = "bfilmy_full_capture.json"
+MATCH_FILE = "bfilmy_toxic_matches.json"
 
-# EXACT BOOKMYSHOW EVENT CODE FOR TOXIC
-TARGET_EVENT_CODE = "ET00378770"
-
-TARGET_THEATRE_KEYWORDS = [
-    "pvr market city",
-    "market city kurla",
-    "pvr marketcity",
-    "kurla"
-]
-
-RAW_FILE = "bfilmy_toxic_raw.json"
-
-
-# ============================================================
-# GOOGLE SHEET HEADERS
-# ============================================================
 
 HEADERS = [
     "Snapshot Timestamp (IST)",
@@ -54,46 +35,47 @@ HEADERS = [
     "Show Time",
     "Total Seats",
     "Available Seats",
-    "Sold / Booked Seats",
+    "Booked / Sold Seats",
     "Occupancy %",
-    "Booking Source",
-    "Data Status"
+    "Source",
+    "Status"
 ]
 
 
-# ============================================================
-# TIME
-# ============================================================
-
-def get_ist_time():
-
+def ist_now():
     return (
-        datetime.datetime.now(
-            datetime.timezone.utc
-        )
-        + datetime.timedelta(
-            hours=5,
-            minutes=30
-        )
-    )
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(hours=5, minutes=30)
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ============================================================
-# TEXT HELPERS
-# ============================================================
+def walk(obj, path="$"):
+    yield path, obj
 
-def clean(value):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from walk(v, f"{path}.{k}")
 
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from walk(v, f"{path}[{i}]")
+
+
+def stringify(obj):
+    try:
+        return json.dumps(
+            obj,
+            ensure_ascii=False
+        ).lower()
+    except Exception:
+        return str(obj).lower()
+
+
+def text(value):
     if value is None:
         return ""
 
-    if isinstance(value, bool):
-        return str(value)
-
-    if isinstance(
-        value,
-        (dict, list)
-    ):
+    if isinstance(value, (dict, list)):
         return ""
 
     return re.sub(
@@ -103,784 +85,58 @@ def clean(value):
     ).strip()
 
 
-def lower(value):
+def find_keywords(obj):
 
-    return clean(value).lower()
+    s = stringify(obj)
 
-
-def contains_toxic(value):
-
-    text = lower(value)
-
-    return (
-        "toxic: a fairy tale for grown-ups" in text
-        or
-        "toxic a fairy tale for grownups" in text
-        or
-        "toxic a fairy tale for grown-ups" in text
-    )
-
-
-def is_exact_toxic(obj):
-
-    """
-    IMPORTANT:
-    Do not match generic 'Toxic'.
-
-    Match the exact BMS event code OR
-    the actual Toxic title.
-    """
-
-    if not isinstance(obj, dict):
-        return False
-
-    # --------------------------------------------------------
-    # Event code
-    # --------------------------------------------------------
-
-    event_values = [
-        obj.get("event_code"),
-        obj.get("eventCode"),
-        obj.get("event"),
-        obj.get("eventCode"),
-        obj.get("entity_code"),
-        obj.get("entityCode")
+    keywords = [
+        "toxic",
+        "fairy tale",
+        "grown-ups",
+        "grownups",
+        "kurla",
+        "market city",
+        "pvr",
+        "26-08-2026",
+        "2026-08-26",
+        "26/08/2026",
+        "showtime",
+        "show_time",
+        "show time",
+        "available",
+        "booked",
+        "seats",
+        "seat"
     ]
 
-    for value in event_values:
-
-        if clean(value).upper() == TARGET_EVENT_CODE:
-            return True
-
-    # --------------------------------------------------------
-    # Title
-    # --------------------------------------------------------
-
-    title_keys = [
-        "title",
-        "movie",
-        "movieName",
-        "movie_name",
-        "movieTitle",
-        "movie_title",
-        "film",
-        "filmName"
+    return [
+        k for k in keywords
+        if k in s
     ]
 
-    for key in title_keys:
 
-        value = clean(
-            obj.get(key)
-        )
-
-        if contains_toxic(value):
-            return True
-
-    return False
-
-
-# ============================================================
-# RECURSIVE JSON WALK
-# ============================================================
-
-def walk(obj, path="$"):
-
-    yield path, obj
+def compact(obj):
 
     if isinstance(obj, dict):
 
-        for key, value in obj.items():
+        result = {}
 
-            yield from walk(
-                value,
-                f"{path}.{key}"
-            )
+        for k, v in obj.items():
 
-    elif isinstance(obj, list):
+            if isinstance(v, (dict, list)):
 
-        for i, value in enumerate(obj):
+                result[k] = v
 
-            yield from walk(
-                value,
-                f"{path}[{i}]"
-            )
+            else:
 
+                result[k] = v
 
-# ============================================================
-# KEY LOOKUP
-# ============================================================
+        return result
 
-def get_value(
-    obj,
-    keys
-):
+    return obj
 
-    if not isinstance(obj, dict):
-        return None
 
-    lower_keys = {
-        str(k).lower(): k
-        for k in obj.keys()
-    }
-
-    for wanted in keys:
-
-        actual = lower_keys.get(
-            wanted.lower()
-        )
-
-        if actual is not None:
-
-            return obj[
-                actual
-            ]
-
-    return None
-
-
-# ============================================================
-# NUMBER
-# ============================================================
-
-def to_number(value):
-
-    if value is None:
-        return None
-
-    if isinstance(value, bool):
-        return None
-
-    if isinstance(
-        value,
-        (int, float)
-    ):
-        return int(value)
-
-    text = clean(value)
-
-    text = text.replace(
-        ",",
-        ""
-    )
-
-    match = re.search(
-        r"\d+(?:\.\d+)?",
-        text
-    )
-
-    if not match:
-        return None
-
-    try:
-
-        return int(
-            float(
-                match.group(0)
-            )
-        )
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# SEAT FIELDS
-# ============================================================
-
-TOTAL_KEYS = [
-    "totalSeats",
-    "total_seats",
-    "totalSeatCount",
-    "total_seat_count",
-    "seatCount",
-    "seat_count",
-    "capacity",
-    "total"
-]
-
-AVAILABLE_KEYS = [
-    "availableSeats",
-    "available_seats",
-    "availSeats",
-    "avail_seats",
-    "available",
-    "avail",
-    "curAvail",
-    "currentAvailable",
-    "remainingSeats",
-    "remaining"
-]
-
-BOOKED_KEYS = [
-    "bookedSeats",
-    "booked_seats",
-    "booked",
-    "soldSeats",
-    "sold_seats",
-    "sold",
-    "ticketsSold",
-    "tickets_sold"
-]
-
-
-def extract_seats(obj):
-
-    total = to_number(
-        get_value(
-            obj,
-            TOTAL_KEYS
-        )
-    )
-
-    available = to_number(
-        get_value(
-            obj,
-            AVAILABLE_KEYS
-        )
-    )
-
-    booked = to_number(
-        get_value(
-            obj,
-            BOOKED_KEYS
-        )
-    )
-
-    if (
-        total is not None
-        and
-        available is not None
-        and
-        booked is None
-    ):
-
-        booked = max(
-            0,
-            total - available
-        )
-
-    if (
-        total is not None
-        and
-        booked is not None
-        and
-        available is None
-    ):
-
-        available = max(
-            0,
-            total - booked
-        )
-
-    return (
-        total,
-        available,
-        booked
-    )
-
-
-# ============================================================
-# OCCUPANCY
-# ============================================================
-
-def calculate_occupancy(
-    booked,
-    total
-):
-
-    if (
-        booked is None
-        or
-        total is None
-        or
-        total <= 0
-    ):
-
-        return ""
-
-    return round(
-        booked / total * 100,
-        2
-    )
-
-
-# ============================================================
-# FIELD EXTRACTION
-# ============================================================
-
-def get_text(
-    obj,
-    keys
-):
-
-    value = get_value(
-        obj,
-        keys
-    )
-
-    return clean(value)
-
-
-def get_movie(obj):
-
-    return get_text(
-        obj,
-        [
-            "movie",
-            "movieName",
-            "movie_name",
-            "movieTitle",
-            "movie_title",
-            "film",
-            "filmName",
-            "title"
-        ]
-    )
-
-
-def get_event_code(obj):
-
-    value = get_value(
-        obj,
-        [
-            "eventCode",
-            "event_code",
-            "event",
-            "entityCode",
-            "entity_code"
-        ]
-    )
-
-    return clean(value).upper()
-
-
-def get_theatre(obj):
-
-    return get_text(
-        obj,
-        [
-            "theatre",
-            "theater",
-            "theatreName",
-            "theaterName",
-            "cinema",
-            "cinemaName",
-            "venue",
-            "venueName"
-        ]
-    )
-
-
-def get_city(obj):
-
-    return get_text(
-        obj,
-        [
-            "city",
-            "cityName"
-        ]
-    )
-
-
-def get_state(obj):
-
-    return get_text(
-        obj,
-        [
-            "state",
-            "stateName"
-        ]
-    )
-
-
-def get_chain(obj):
-
-    return get_text(
-        obj,
-        [
-            "chain",
-            "chainName",
-            "cinemaChain",
-            "cinema_chain",
-            "brand",
-            "brandName"
-        ]
-    )
-
-
-def get_language(obj):
-
-    return get_text(
-        obj,
-        [
-            "language",
-            "languageName",
-            "lang"
-        ]
-    )
-
-
-def get_format(obj):
-
-    return get_text(
-        obj,
-        [
-            "format",
-            "formatName",
-            "screenFormat",
-            "screen_format",
-            "experience"
-        ]
-    )
-
-
-def get_audi(obj):
-
-    return get_text(
-        obj,
-        [
-            "audi",
-            "audiName",
-            "audi_name",
-            "screen",
-            "screenName",
-            "screen_name"
-        ]
-    )
-
-
-def get_show_time(obj):
-
-    return get_text(
-        obj,
-        [
-            "showTime",
-            "show_time",
-            "showtime",
-            "time",
-            "timing",
-            "startTime",
-            "start_time"
-        ]
-    )
-
-
-def get_date(obj):
-
-    return get_text(
-        obj,
-        [
-            "showDate",
-            "show_date",
-            "date",
-            "bookingDate",
-            "booking_date"
-        ]
-    )
-
-
-# ============================================================
-# THEATRE MATCH
-# ============================================================
-
-def theatre_matches(obj):
-
-    theatre = lower(
-        get_theatre(obj)
-    )
-
-    if not theatre:
-
-        return False
-
-    return any(
-        keyword in theatre
-        for keyword in TARGET_THEATRE_KEYWORDS
-    )
-
-
-# ============================================================
-# DATE MATCH
-# ============================================================
-
-def date_matches(obj):
-
-    value = get_date(obj)
-
-    if not value:
-
-        # If date isn't attached to the object,
-        # don't reject it.
-        return True
-
-    value = clean(value)
-
-    # Direct target formats
-    possible = [
-        "2026-08-26",
-        "26-08-2026",
-        "26/08/2026",
-        "26.08.2026",
-        "2026/08/26"
-    ]
-
-    for candidate in possible:
-
-        if candidate in value:
-
-            return True
-
-    # If date is just another format, extract digits
-    digits = re.sub(
-        r"\D",
-        "",
-        value
-    )
-
-    return (
-        "20260826" in digits
-        or
-        "26082026" in digits
-    )
-
-
-# ============================================================
-# BUILD ROW
-# ============================================================
-
-def build_row(
-    obj,
-    snapshot
-):
-
-    if not isinstance(obj, dict):
-
-        return None
-
-    # Exact Toxic match
-    if not is_exact_toxic(obj):
-
-        return None
-
-    event_code = get_event_code(
-        obj
-    )
-
-    movie = get_movie(
-        obj
-    )
-
-    # --------------------------------------------------------
-    # Never accept Toxic Avenger
-    # --------------------------------------------------------
-
-    if "toxic avenger" in lower(
-        movie
-    ):
-
-        return None
-
-    # --------------------------------------------------------
-    # Theatre
-    # --------------------------------------------------------
-
-    theatre = get_theatre(
-        obj
-    )
-
-    # If a theatre exists and isn't Kurla,
-    # reject it for this particular tracker.
-
-    if theatre:
-
-        if not theatre_matches(obj):
-
-            return None
-
-    # --------------------------------------------------------
-    # Date
-    # --------------------------------------------------------
-
-    if not date_matches(obj):
-
-        return None
-
-    # --------------------------------------------------------
-    # Other fields
-    # --------------------------------------------------------
-
-    state = get_state(
-        obj
-    )
-
-    city = get_city(
-        obj
-    )
-
-    chain = get_chain(
-        obj
-    )
-
-    language = get_language(
-        obj
-    )
-
-    fmt = get_format(
-        obj
-    )
-
-    audi = get_audi(
-        obj
-    )
-
-    show_time = get_show_time(
-        obj
-    )
-
-    total, available, booked = extract_seats(
-        obj
-    )
-
-    # --------------------------------------------------------
-    # Calculate
-    # --------------------------------------------------------
-
-    if (
-        total is not None
-        and
-        available is not None
-        and
-        booked is None
-    ):
-
-        booked = max(
-            0,
-            total - available
-        )
-
-    if (
-        total is not None
-        and
-        booked is not None
-        and
-        available is None
-    ):
-
-        available = max(
-            0,
-            total - booked
-        )
-
-    occ = calculate_occupancy(
-        booked,
-        total
-    )
-
-    # --------------------------------------------------------
-    # No invented values
-    # --------------------------------------------------------
-
-    status_parts = []
-
-    if show_time:
-        status_parts.append(
-            "Show time found"
-        )
-
-    if total is not None:
-        status_parts.append(
-            "Total seats found"
-        )
-
-    if available is not None:
-        status_parts.append(
-            "Available seats found"
-        )
-
-    if booked is not None:
-        status_parts.append(
-            "Booked seats found"
-        )
-
-    if not status_parts:
-
-        status_parts.append(
-            "Toxic record found - show/seat fields not directly attached"
-        )
-
-    return [
-        snapshot,
-        TARGET_DATE,
-        state,
-        city,
-        chain,
-        theatre,
-        movie,
-        event_code,
-        language,
-        fmt,
-        audi,
-        show_time,
-        total if total is not None else "",
-        available if available is not None else "",
-        booked if booked is not None else "",
-        occ,
-        "BFilmy / District",
-        " | ".join(
-            status_parts
-        )
-    ]
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def run():
-
-    print(
-        "\n=============================================="
-    )
-
-    print(
-        "TOXIC 26 AUGUST - BFILMY EXTRACTION"
-    )
-
-    print(
-        "=============================================="
-    )
-
-    print(
-        "Target event:",
-        TARGET_EVENT_CODE
-    )
-
-    print(
-        "Target date:",
-        TARGET_DATE
-    )
-
-    print(
-        "Target theatre:",
-        TARGET_THEATRE_KEYWORDS
-    )
-
-    # --------------------------------------------------------
-    # Timestamp
-    # --------------------------------------------------------
-
-    snapshot = get_ist_time().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    # --------------------------------------------------------
-    # Google Sheets
-    # --------------------------------------------------------
-
-    print(
-        "\n1. Connecting to Google Sheets..."
-    )
+def connect_sheet():
 
     sa_info = json.loads(
         os.environ["GCP_SA_KEY"]
@@ -893,9 +149,7 @@ def run():
         ]
     )
 
-    client = gspread.authorize(
-        creds
-    )
+    client = gspread.authorize(creds)
 
     spreadsheet = client.open_by_key(
         SPREADSHEET_ID
@@ -909,39 +163,66 @@ def run():
 
     except gspread.exceptions.WorksheetNotFound:
 
-        print(
-            "Creating:",
-            SHEET_TAB_NAME
-        )
-
         sheet = spreadsheet.add_worksheet(
             title=SHEET_TAB_NAME,
             rows=5000,
             cols=len(HEADERS)
         )
 
-    # --------------------------------------------------------
-    # Ensure header
-    # --------------------------------------------------------
+        sheet.append_row(
+            HEADERS,
+            value_input_option="USER_ENTERED"
+        )
 
-    current_values = sheet.get_all_values()
+    values = sheet.get_all_values()
 
-    if not current_values:
+    if not values:
 
         sheet.append_row(
             HEADERS,
             value_input_option="USER_ENTERED"
         )
 
-    # --------------------------------------------------------
-    # Browser
-    # --------------------------------------------------------
+    return sheet
+
+
+def run():
+
+    print(
+        "\n=============================================="
+    )
+
+    print(
+        "BFILMY RAW STRUCTURE DIAGNOSTIC"
+    )
+
+    print(
+        "=============================================="
+    )
+
+    print(
+        "Date:",
+        TARGET_DATE
+    )
+
+    print(
+        "URL:",
+        URL
+    )
+
+    snapshot = ist_now()
+
+    print(
+        "\n1. Connecting to Google Sheets..."
+    )
+
+    sheet = connect_sheet()
+
+    captured = []
 
     print(
         "\n2. Launching Chromium..."
     )
-
-    captured = []
 
     with sync_playwright() as p:
 
@@ -979,13 +260,7 @@ def run():
 
         page = context.new_page()
 
-        # ----------------------------------------------------
-        # Capture JSON
-        # ----------------------------------------------------
-
-        def response_handler(
-            response
-        ):
+        def response_handler(response):
 
             try:
 
@@ -995,29 +270,31 @@ def run():
                 ).lower()
 
                 if "json" not in content_type:
-
                     return
 
-                text = response.text()
+                body = response.text()
 
-                if not text:
-
+                if not body:
                     return
 
                 try:
 
-                    data = json.loads(
-                        text
-                    )
+                    data = json.loads(body)
 
                 except Exception:
 
                     return
 
                 captured.append({
+
                     "url": response.url,
+
                     "status": response.status,
+
+                    "content_type": content_type,
+
                     "data": data
+
                 })
 
             except Exception:
@@ -1028,10 +305,6 @@ def run():
             response_handler
         )
 
-        # ----------------------------------------------------
-        # Open BFilmy
-        # ----------------------------------------------------
-
         print(
             "\n3. Opening BFilmy..."
         )
@@ -1039,7 +312,7 @@ def run():
         try:
 
             response = page.goto(
-                BFILMY_URL,
+                URL,
                 wait_until="domcontentloaded",
                 timeout=60000
             )
@@ -1047,7 +320,7 @@ def run():
             if response:
 
                 print(
-                    "HTTP:",
+                    "HTTP status:",
                     response.status
                 )
 
@@ -1058,77 +331,61 @@ def run():
                 repr(e)
             )
 
-        # ----------------------------------------------------
-        # Wait
-        # ----------------------------------------------------
-
         print(
-            "\n4. Waiting for BFilmy data..."
+            "\n4. Waiting..."
         )
 
         page.wait_for_timeout(
             10000
         )
 
-        # ----------------------------------------------------
-        # Scroll
-        # ----------------------------------------------------
-
         print(
             "\n5. Scrolling..."
         )
 
-        for i in range(15):
+        for _ in range(20):
 
             try:
 
                 page.mouse.wheel(
                     0,
-                    1400
+                    1600
                 )
 
             except Exception:
                 pass
 
             page.wait_for_timeout(
-                700
+                500
             )
 
         page.wait_for_timeout(
             5000
         )
 
-        # ----------------------------------------------------
-        # Page text
-        # ----------------------------------------------------
-
         try:
 
-            text = page.locator(
+            body = page.locator(
                 "body"
             ).inner_text()
 
             print(
-                "\nPage text length:",
-                len(text)
+                "\nPage text:",
+                len(body)
             )
 
             print(
-                "Toxic visible:",
-                contains_toxic(text)
+                "Toxic in visible page:",
+                "toxic" in body.lower()
             )
 
         except Exception:
             pass
 
-        # ----------------------------------------------------
-        # Screenshot
-        # ----------------------------------------------------
-
         try:
 
             page.screenshot(
-                path="bfilmy_toxic.png",
+                path="bfilmy_full.png",
                 full_page=True
             )
 
@@ -1137,17 +394,13 @@ def run():
 
         browser.close()
 
-    # ========================================================
-    # PROCESS CAPTURED JSON
-    # ========================================================
-
     print(
         "\n6. JSON responses captured:",
         len(captured)
     )
 
     # --------------------------------------------------------
-    # Save raw
+    # SAVE EVERYTHING
     # --------------------------------------------------------
 
     with open(
@@ -1164,111 +417,161 @@ def run():
         )
 
     print(
-        "Raw JSON saved:",
+        "Saved:",
         RAW_FILE
     )
 
-    # ========================================================
-    # FIND EXACT TOXIC OBJECTS
-    # ========================================================
-
-    toxic_objects = []
-
-    for response in captured:
-
-        data = response.get(
-            "data"
-        )
-
-        for path, obj in walk(
-            data
-        ):
-
-            if not isinstance(
-                obj,
-                dict
-            ):
-
-                continue
-
-            if is_exact_toxic(
-                obj
-            ):
-
-                toxic_objects.append({
-                    "url":
-                        response.get(
-                            "url",
-                            ""
-                        ),
-                    "path":
-                        path,
-                    "object":
-                        obj
-                })
-
-    print(
-        "Exact Toxic objects:",
-        len(toxic_objects)
-    )
-
-    # ========================================================
-    # BUILD ROWS
-    # ========================================================
-
-    rows = []
-
-    seen = set()
-
-    for item in toxic_objects:
-
-        obj = item[
-            "object"
-        ]
-
-        row = build_row(
-            obj,
-            snapshot
-        )
-
-        if row is None:
-            continue
-
-        # ----------------------------------------------------
-        # Deduplicate
-        # ----------------------------------------------------
-
-        key = (
-            row[1],   # date
-            row[5],   # theatre
-            row[8],   # language
-            row[9],   # format
-            row[10],  # audi
-            row[11]   # time
-        )
-
-        if key in seen:
-
-            continue
-
-        seen.add(
-            key
-        )
-
-        rows.append(
-            row
-        )
-
-    # ========================================================
-    # PRINT
-    # ========================================================
+    # --------------------------------------------------------
+    # ANALYSE EVERY JSON RESPONSE
+    # --------------------------------------------------------
 
     print(
         "\n=============================================="
     )
 
     print(
-        "FINAL EXTRACTION"
+        "RESPONSE ANALYSIS"
+    )
+
+    print(
+        "=============================================="
+    )
+
+    all_matches = []
+
+    for response_number, response in enumerate(
+        captured,
+        start=1
+    ):
+
+        data = response["data"]
+
+        print(
+            f"\nJSON RESPONSE #{response_number}"
+        )
+
+        print(
+            "URL:",
+            response["url"]
+        )
+
+        print(
+            "Status:",
+            response["status"]
+        )
+
+        found = find_keywords(
+            data
+        )
+
+        print(
+            "Keywords:",
+            ", ".join(found)
+            if found
+            else "NONE"
+        )
+
+        # ----------------------------------------------------
+        # Every object containing relevant words
+        # ----------------------------------------------------
+
+        for path, obj in walk(data):
+
+            if not isinstance(
+                obj,
+                (dict, list)
+            ):
+
+                continue
+
+            keywords = find_keywords(
+                obj
+            )
+
+            if not keywords:
+                continue
+
+            # Don't save gigantic root structures repeatedly
+            if isinstance(obj, dict):
+
+                if len(obj) > 100:
+
+                    continue
+
+            match = {
+
+                "response_number":
+                    response_number,
+
+                "url":
+                    response["url"],
+
+                "path":
+                    path,
+
+                "keywords":
+                    keywords,
+
+                "object":
+                    compact(obj)
+
+            }
+
+            all_matches.append(
+                match
+            )
+
+            print(
+                "\nMATCH:",
+                path
+            )
+
+            print(
+                "Keywords:",
+                keywords
+            )
+
+            try:
+
+                preview = json.dumps(
+                    obj,
+                    ensure_ascii=False
+                )
+
+                if len(preview) > 2000:
+
+                    preview = preview[:2000] + "..."
+
+                print(
+                    preview
+                )
+
+            except Exception:
+                pass
+
+    # --------------------------------------------------------
+    # SAVE MATCHES
+    # --------------------------------------------------------
+
+    with open(
+        MATCH_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            all_matches,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    print(
+        "\n=============================================="
+    )
+
+    print(
+        "DIAGNOSTIC SUMMARY"
     )
 
     print(
@@ -1276,68 +579,52 @@ def run():
     )
 
     print(
-        "Exact Toxic objects:",
-        len(toxic_objects)
+        "JSON responses:",
+        len(captured)
     )
 
     print(
-        "Kurla rows:",
-        len(rows)
+        "Relevant objects:",
+        len(all_matches)
     )
 
-    for row in rows:
+    print(
+        "Full capture:",
+        RAW_FILE
+    )
 
-        print(
-            "\n" +
-            " | ".join(
-                str(x)
-                for x in row
-            )
-        )
+    print(
+        "Relevant matches:",
+        MATCH_FILE
+    )
 
-    # ========================================================
-    # WRITE SHEET
-    # ========================================================
+    # --------------------------------------------------------
+    # GOOGLE SHEET STATUS
+    # --------------------------------------------------------
 
-    if rows:
-
-        print(
-            "\n7. Writing to Google Sheet..."
-        )
-
-        sheet.append_rows(
-            rows,
-            value_input_option="USER_ENTERED"
-        )
-
-        print(
-            "SUCCESS:",
-            len(rows),
-            "rows written."
-        )
-
-    else:
-
-        print(
-            "\n7. No Kurla rows extracted."
-        )
-
-        print(
-            "Raw JSON has been saved as:",
-            RAW_FILE
-        )
-
-        print(
-            "This is intentional:"
-        )
-
-        print(
-            "the tracker will not invent show/seat numbers."
-        )
-
-    # ========================================================
-    # FINAL
-    # ========================================================
+    sheet.append_row(
+        [
+            snapshot,
+            TARGET_DATE,
+            "",
+            "",
+            "",
+            "",
+            "Toxic",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "BFilmy",
+            f"Diagnostic: {len(captured)} JSON responses; {len(all_matches)} relevant objects"
+        ],
+        value_input_option="USER_ENTERED"
+    )
 
     print(
         "\n=============================================="
@@ -1352,28 +639,15 @@ def run():
     )
 
     print(
-        "Target:",
-        TARGET_MOVIE
+        "Upload/download these two files from the GitHub Action:"
     )
 
     print(
-        "Event:",
-        TARGET_EVENT_CODE
-    )
-
-    print(
-        "Date:",
-        TARGET_DATE
-    )
-
-    print(
-        "Rows written:",
-        len(rows)
-    )
-
-    print(
-        "Raw file:",
         RAW_FILE
+    )
+
+    print(
+        MATCH_FILE
     )
 
 
