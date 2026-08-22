@@ -14,27 +14,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            curl_cffi \
-            gspread \
-            google-auth \
-            pytz \
-            playwright
+          pip install curl_cffi
+          pip install gspread
+          pip install google-auth
+          pip install pytz
+          pip install playwright
 
       - name: Install Playwright Chromium
         run: |
           python -m playwright install chromium
           python -m playwright install-deps chromium
 
-      - name: Verify Playwright Installation
+      - name: Verify Playwright
         run: |
           python -c "import playwright; print('Playwright installed successfully')"
 
