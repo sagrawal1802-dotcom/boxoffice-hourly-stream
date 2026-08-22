@@ -2,12 +2,10 @@ import os
 import re
 import json
 import time
-import base64
-import datetime
-from typing import Optional
+from datetime import datetime
 
-import pytz
 import gspread
+import pytz
 from google.oauth2.service_account import Credentials
 from curl_cffi import requests
 
@@ -16,45 +14,27 @@ from curl_cffi import requests
 # CONFIGURATION
 # ============================================================
 
-EVENT_CODE = "ET00379311"
-VENUE_CODE = "CSWO"
-CITY = "mumbai"
-SHOW_DATE = "20260826"
+EVENT_CODE = os.getenv("EVENT_CODE", "ET00379311")
+VENUE_CODE = os.getenv("VENUE_CODE", "CSWO")
+SHOW_DATE = os.getenv("SHOW_DATE", "20260826")
+CITY = os.getenv("CITY", "mumbai")
+REGION_CODE = os.getenv("REGION_CODE", "MUMBAI")
 
-SPREADSHEET_ID = os.environ.get(
+SPREADSHEET_ID = os.getenv(
     "SPREADSHEET_ID",
     "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 )
 
-SHEET_NAME = "BMS Seats"
+WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "BMS Seats")
 
 IST = pytz.timezone("Asia/Kolkata")
 
 
 # ============================================================
-# BMS REQUEST CONFIG
+# GOOGLE SHEET HEADERS
 # ============================================================
 
-BMS_BASE = "https://services-in.bookmyshow.com"
-
-HEADERS = {
-    "accept": "application/json, text/plain, */*",
-    "accept-language": "en-IN,en;q=0.9",
-    "origin": "https://in.bookmyshow.com",
-    "referer": "https://in.bookmyshow.com/",
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/151.0.0.0 Safari/537.36"
-    ),
-}
-
-
-# ============================================================
-# GOOGLE SHEETS
-# ============================================================
-
-HEADERS_SHEET = [
+SEAT_HEADERS = [
     "Timestamp IST",
     "Event Code",
     "Venue Code",
@@ -69,501 +49,258 @@ HEADERS_SHEET = [
     "Seat Token",
     "Seat Code",
     "Seat Number",
-    "Status",
+    "BMS State",
+    "Price",
+    "Sold Gross",
+]
+
+SUMMARY_HEADERS = [
+    "Timestamp IST",
+    "Event Code",
+    "Venue Code",
+    "Session ID",
+    "Show Time",
+    "Date",
+    "City",
+    "Category",
+    "Price",
+    "Available",
+    "Sold",
+    "Total Seats",
+    "Occupancy %",
+    "Gross",
 ]
 
 
 # ============================================================
-# CATEGORY MAP
+# BMS HEADERS
 # ============================================================
 
-CATEGORY_MAP = {
-    "A": "RECLINER",
-    "B": "PREMIUM",
-    "C": "EXECUTIVE XL",
-    "D": "EXECUTIVE",
-    "E": "NORMAL",
-}
+def build_headers():
+
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/151.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://in.bookmyshow.com",
+        "Referer": (
+            f"https://in.bookmyshow.com/"
+            f"movies/{CITY}/seat-layout/"
+            f"{EVENT_CODE}/{VENUE_CODE}/{SHOW_DATE}"
+        ),
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Connection": "keep-alive",
+    }
 
 
 # ============================================================
-# GOOGLE SHEETS CONNECTION
+# BMS PRIMARY SEAT-LAYOUT URL
 # ============================================================
 
-def connect_google_sheets():
+def build_url():
 
-    print()
+    return (
+        "https://in.bookmyshow.com/"
+        "api/movies-data/seatlayout/v1/primary"
+        f"?eventCode={EVENT_CODE}"
+        f"&dateCode={SHOW_DATE}"
+        f"&regionCode={REGION_CODE}"
+        f"&venueCode={VENUE_CODE}"
+    )
+
+
+# ============================================================
+# REQUEST BMS
+# ============================================================
+
+def request_bms():
+
+    url = build_url()
+    headers = build_headers()
+
     print("=" * 70)
-    print("Connecting to Google Sheets...")
+    print("BMS VENUE-LEVEL REQUEST")
     print("=" * 70)
+    print(url)
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    for attempt in range(1, 4):
 
-    credentials = None
-
-    # --------------------------------------------------------
-    # METHOD 1: BASE64 SECRET
-    # --------------------------------------------------------
-
-    key_b64 = os.environ.get("GCP_SA_KEY_B64")
-
-    if key_b64:
-        try:
-            decoded = base64.b64decode(key_b64).decode("utf-8")
-            service_account_info = json.loads(decoded)
-
-            credentials = Credentials.from_service_account_info(
-                service_account_info,
-                scopes=scopes
-            )
-
-            print("Google credentials loaded from GCP_SA_KEY_B64")
-
-        except Exception as e:
-            print("ERROR decoding GCP_SA_KEY_B64:")
-            print(e)
-
-    # --------------------------------------------------------
-    # METHOD 2: JSON SECRET
-    # --------------------------------------------------------
-
-    if credentials is None:
-
-        key_json = os.environ.get("GCP_SA_KEY")
-
-        if key_json:
-
-            try:
-                service_account_info = json.loads(key_json)
-
-                credentials = Credentials.from_service_account_info(
-                    service_account_info,
-                    scopes=scopes
-                )
-
-                print("Google credentials loaded from GCP_SA_KEY")
-
-            except Exception as e:
-                print("ERROR loading GCP_SA_KEY:")
-                print(e)
-
-    # --------------------------------------------------------
-    # METHOD 3: LOCAL credentials.json
-    # --------------------------------------------------------
-
-    if credentials is None and os.path.exists("credentials.json"):
-
-        try:
-
-            credentials = Credentials.from_service_account_file(
-                "credentials.json",
-                scopes=scopes
-            )
-
-            print("Google credentials loaded from credentials.json")
-
-        except Exception as e:
-
-            print("ERROR loading credentials.json:")
-            print(e)
-
-    if credentials is None:
-
-        raise RuntimeError(
-            "Google credentials not found. "
-            "Set GCP_SA_KEY_B64 or GCP_SA_KEY in GitHub Secrets."
-        )
-
-    client = gspread.authorize(credentials)
-
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-
-    try:
-        worksheet = spreadsheet.worksheet(SHEET_NAME)
-        print(f"Using existing sheet: {SHEET_NAME}")
-
-    except gspread.WorksheetNotFound:
-
-        worksheet = spreadsheet.add_worksheet(
-            title=SHEET_NAME,
-            rows=10000,
-            cols=len(HEADERS_SHEET)
-        )
-
-        print(f"Created sheet: {SHEET_NAME}")
-
-    return worksheet
-
-
-# ============================================================
-# BMS REQUEST
-# ============================================================
-
-def bms_request(url, params=None, retries=3):
-
-    for attempt in range(1, retries + 1):
-
-        print(f"Attempt {attempt}/{retries}")
+        print(f"\nAttempt {attempt}/3")
 
         try:
 
             response = requests.get(
                 url,
-                params=params,
-                headers=HEADERS,
-                impersonate="chrome",
+                headers=headers,
+                impersonate="chrome120",
                 timeout=30,
             )
 
             print("HTTP status:", response.status_code)
-            print("Response size:", len(response.content), "bytes")
-
-            # ------------------------------------------------
-            # CLOUDFLARE RATE LIMIT
-            # ------------------------------------------------
-
-            if response.status_code == 429:
-
-                print("BMS/Cloudflare rate limited.")
-
-                if attempt < retries:
-
-                    wait_time = 30 * (2 ** (attempt - 1))
-
-                    print(
-                        f"Waiting {wait_time} seconds before retry..."
-                    )
-
-                    time.sleep(wait_time)
-
-                    continue
-
-                return None
+            print("Response size:", len(response.content))
 
             if response.status_code != 200:
 
-                print("Unexpected HTTP status.")
+                print("Response preview:")
+                print(response.text[:2000])
 
-                if attempt < retries:
-                    time.sleep(5)
-                    continue
+                if attempt < 3:
+                    time.sleep(2 * attempt)
 
-                return None
-
-            # ------------------------------------------------
-            # JSON
-            # ------------------------------------------------
+                continue
 
             try:
-                return response.json()
-
+                data = response.json()
             except Exception:
 
-                text = response.text
-
                 print("Could not decode JSON.")
-                print(text[:500])
+                print(response.text[:3000])
 
-                if attempt < retries:
-                    time.sleep(5)
-                    continue
+                if attempt < 3:
+                    time.sleep(2 * attempt)
 
-                return None
+                continue
+
+            return data
 
         except Exception as e:
 
-            print("Request error:")
-            print(e)
+            print("REQUEST ERROR:")
+            print(repr(e))
 
-            if attempt < retries:
-                time.sleep(5)
+            if attempt < 3:
+                time.sleep(2 * attempt)
 
     return None
 
 
 # ============================================================
-# DISCOVER ALL SHOWS
+# GET BOOKMYSHOW OBJECT
 # ============================================================
 
-def discover_shows():
+def get_bookmyshow(data):
 
-    print()
-    print("=" * 70)
-    print("DISCOVERING ALL SHOWS")
-    print("=" * 70)
+    if not isinstance(data, dict):
+        return {}
 
-    print("Event:", EVENT_CODE)
-    print("Venue:", VENUE_CODE)
-    print("Date:", SHOW_DATE)
+    if "BookMyShow" in data:
+        return data["BookMyShow"]
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # This endpoint is the show/session discovery endpoint
-    # used by the earlier all-show tracker.
-    # --------------------------------------------------------
+    return data
 
-    url = (
-        f"{BMS_BASE}/api/bookings/seatlayout/"
-        f"{EVENT_CODE}/{VENUE_CODE}/{SHOW_DATE}"
-    )
 
-    print()
-    print("Trying BMS show discovery...")
+# ============================================================
+# FIND STRDATA RECURSIVELY
+# ============================================================
 
-    data = bms_request(url)
+def find_strdata(obj):
 
-    shows = []
+    if isinstance(obj, dict):
 
-    if data:
+        if "strData" in obj and isinstance(obj["strData"], str):
+            return obj["strData"]
 
-        shows = extract_show_sessions(data)
+        for value in obj.values():
 
-    # --------------------------------------------------------
-    # FALLBACK:
-    # The known sessions from the previous successful
-    # discovery are used only if BMS discovery returns the
-    # session list in an unexpected format.
-    # --------------------------------------------------------
+            result = find_strdata(value)
 
-    if not shows:
+            if result:
+                return result
 
-        print()
-        print("WARNING: Could not extract show sessions from response.")
+    elif isinstance(obj, list):
 
-        print(
-            "Using previously discovered session list "
-            "as fallback."
-        )
+        for value in obj:
 
-        shows = [
-            ("07:00 AM", "15925"),
-            ("08:00 AM", "15934"),
-            ("09:00 AM", "16072"),
-            ("10:40 AM", "15926"),
-            ("11:40 AM", "15933"),
-            ("01:05 PM", "16073"),
-            ("02:45 PM", "15927"),
-            ("03:45 PM", "15932"),
-            ("05:10 PM", "16074"),
-            ("06:50 PM", "15928"),
-            ("07:50 PM", "15931"),
-            ("09:15 PM", "16075"),
-            ("10:55 PM", "15929"),
-            ("11:55 PM", "15930"),
-        ]
+            result = find_strdata(value)
 
-    # remove duplicates
+            if result:
+                return result
 
-    unique = []
+    return None
 
-    seen = set()
 
-    for show_time, session_id in shows:
+# ============================================================
+# CATEGORY PARSER
+# ============================================================
 
-        session_id = str(session_id)
+def parse_categories(category_section):
 
-        if session_id in seen:
+    categories = {}
+
+    parts = category_section.split("|")
+
+    for part in parts:
+
+        part = part.strip()
+
+        if not part:
             continue
 
-        seen.add(session_id)
+        pieces = part.split(":")
 
-        unique.append(
-            (show_time, session_id)
-        )
-
-    shows = unique
-
-    print()
-    print("=" * 70)
-    print(f"SHOWS FOUND: {len(shows)}")
-    print("=" * 70)
-
-    for i, (show_time, session_id) in enumerate(shows, 1):
-
-        print(
-            f"{i:02d}. {show_time:<10} -> Session {session_id}"
-        )
-
-    return shows
-
-
-# ============================================================
-# EXTRACT SHOW SESSIONS
-# ============================================================
-
-def extract_show_sessions(data):
-
-    shows = []
-
-    def recursive_search(obj):
-
-        if isinstance(obj, dict):
-
-            # Common possible combinations
-
-            session_id = None
-            show_time = None
-
-            for key, value in obj.items():
-
-                key_lower = str(key).lower()
-
-                if key_lower in (
-                    "sessionid",
-                    "session_id",
-                    "session",
-                    "sessioncode",
-                    "sessioncodeid",
-                ):
-
-                    if value is not None:
-                        session_id = str(value)
-
-                if key_lower in (
-                    "showtime",
-                    "show_time",
-                    "starttime",
-                    "start_time",
-                    "showtimeformatted",
-                    "sessiontime",
-                ):
-
-                    if value is not None:
-                        show_time = str(value)
-
-            if session_id:
-
-                if not show_time:
-                    show_time = ""
-
-                shows.append(
-                    (show_time, session_id)
-                )
-
-            for value in obj.values():
-                recursive_search(value)
-
-        elif isinstance(obj, list):
-
-            for item in obj:
-                recursive_search(item)
-
-    recursive_search(data)
-
-    # clean duplicates
-
-    result = []
-
-    seen = set()
-
-    for show_time, session_id in shows:
-
-        if session_id in seen:
+        if len(pieces) < 2:
             continue
 
-        seen.add(session_id)
+        category_name = pieces[0].strip()
+        category_code = pieces[1].strip()
 
-        result.append(
-            (show_time, session_id)
-        )
+        if category_code:
+            categories[category_code] = category_name
 
-    return result
+    return categories
 
 
 # ============================================================
 # SEAT TOKEN PARSER
+#
+# B1042+6
+#
+# B1042 = seat code
+# 6     = actual seat number
+#
+# B1048 = AVAILABLE
+# B2049 = SOLD
+#
+# 10xxx -> AVAILABLE
+# 20xxx -> SOLD
 # ============================================================
 
 def parse_seat_token(token):
 
-    """
-    BMS examples:
-
-    B1042+2
-    B1048+6
-    B2049+7
-
-    IMPORTANT:
-
-    The number after + is the actual seat number.
-
-    The 10 / 20 inside the seat code indicates state.
-
-    10 = AVAILABLE
-    20 = SOLD
-
-    Therefore:
-
-    B1048+6
-        seat code = B1048
-        seat number = 6
-        status = AVAILABLE
-
-    B2049+7
-        seat code = B2049
-        seat number = 7
-        status = SOLD
-    """
+    token = token.strip()
 
     if not token:
         return None
 
-    token = token.strip()
-
-    if "+" not in token:
-        return None
-
-    left, seat_number = token.rsplit("+", 1)
-
-    if not seat_number.isdigit():
-        return None
-
-    # Ignore placeholders
-
-    if left.endswith("0"):
-        return None
-
-    # --------------------------------------------------------
-    # BMS STATE:
-    #
-    # 10 = available
-    # 20 = sold
-    #
-    # Seat codes generally look like:
-    #
-    # A1052
-    # A20515
-    # B1048
-    # B2049
-    # --------------------------------------------------------
-
     match = re.match(
-        r"^([A-Z])([12])0(.+)$",
-        left
+        r"^([A-Z])([12])(\d+)\+(\d+)$",
+        token
     )
 
     if not match:
         return None
 
     row_letter = match.group(1)
-    state_digit = match.group(2)
-    seat_part = match.group(3)
+    state_prefix = match.group(2)
+    seat_body = match.group(3)
+    seat_number = match.group(4)
 
-    # Reconstruct original seat code
+    seat_code = (
+        row_letter +
+        state_prefix +
+        seat_body
+    )
 
-    seat_code = left
-
-    if state_digit == "1":
+    if state_prefix == "1":
         status = "AVAILABLE"
-
-    elif state_digit == "2":
+    elif state_prefix == "2":
         status = "SOLD"
-
     else:
-        return None
+        status = "UNKNOWN"
 
     return {
         "seat_token": token,
@@ -575,422 +312,619 @@ def parse_seat_token(token):
 
 
 # ============================================================
-# PARSE RAW SEAT LAYOUT
+# PARSE BMS ROWS
+#
+# Example:
+#
+# 1:M:A000:
+# A0+0:
+# A1052+1:
+# A1053+2:
+# ...
+#
+# The number after + is the actual seat number.
 # ============================================================
 
-def parse_seat_layout(str_data, show_time, session_id):
-
-    seats = []
+def parse_seat_rows(str_data):
 
     if not str_data:
-        return seats
+        return []
 
-    # --------------------------------------------------------
-    # strData contains sections like:
-    #
-    # 1:M:A000:...
-    # 2:L:B000:...
-    #
-    # Each section represents one physical BMS row.
-    # --------------------------------------------------------
+    sections = str_data.split("||", 1)
 
-    row_sections = re.split(
-        r"\|(?=\d+:)",
-        str_data
-    )
+    if len(sections) != 2:
 
-    for section in row_sections:
+        print("Could not split BMS category section from seat section.")
 
-        section = section.strip()
+        return []
 
-        if not section:
+    category_section = sections[0]
+    seat_section = sections[1]
+
+    categories = parse_categories(category_section)
+
+    print()
+    print("CATEGORY MAP")
+    print("=" * 70)
+
+    for code, name in categories.items():
+        print(f"{code} -> {name}")
+
+    results = []
+
+    raw_rows = seat_section.split("|")
+
+    for raw_row in raw_rows:
+
+        raw_row = raw_row.strip()
+
+        if not raw_row:
             continue
 
-        # ----------------------------------------------------
-        # ROW HEADER
-        #
-        # 1:M:A000:
-        # 2:L:B000:
-        # ----------------------------------------------------
+        parts = raw_row.split(":")
 
-        row_match = re.match(
-            r"^(\d+):([^:]+):([^:]+):(.*)$",
-            section
-        )
-
-        if not row_match:
+        if len(parts) < 4:
             continue
 
-        row_number = row_match.group(1)
-        row_name = row_match.group(2)
-        category_code = row_match.group(3)
-        seat_data = row_match.group(4)
+        row_number = parts[0].strip()
+        row_name = parts[1].strip()
+        category_code = parts[2].strip()
 
-        # ----------------------------------------------------
-        # Category based on first letter of category code
-        # ----------------------------------------------------
-
-        category_letter = category_code[:1]
-
-        category = CATEGORY_MAP.get(
-            category_letter,
+        category_name = categories.get(
+            category_code,
             category_code
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # Seat entries are separated by +
-        #
-        # Example:
-        #
-        # A1052+1
-        # A1053+2
-        #
-        # But the raw BMS format can have:
-        #
-        # A1052+1:A1053+2
-        #
-        # Therefore we locate seat tokens directly.
-        # ----------------------------------------------------
+        # Everything after the first 3 fields is seat data.
+        seat_tokens = parts[3:]
 
-        tokens = re.findall(
-            r"[A-Z][12]0[0-9]+?\+[0-9]+",
-            seat_data
-        )
+        for token in seat_tokens:
 
-        # ----------------------------------------------------
-        # Also support codes where the state portion is
-        # embedded differently.
-        # ----------------------------------------------------
+            token = token.strip()
 
-        if not tokens:
-
-            tokens = re.findall(
-                r"[A-Z][0-9]+\+[0-9]+",
-                seat_data
-            )
-
-        for token in tokens:
+            if not token:
+                continue
 
             parsed = parse_seat_token(token)
 
             if not parsed:
                 continue
 
-            seats.append({
-                "timestamp": datetime.datetime.now(IST).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "event_code": EVENT_CODE,
-                "venue_code": VENUE_CODE,
-                "session_id": str(session_id),
-                "show_time": show_time,
-                "date": SHOW_DATE,
-                "city": CITY,
+            results.append({
                 "row_number": row_number,
                 "row_name": row_name,
                 "category_code": category_code,
-                "category": category,
+                "category": category_name,
                 "seat_token": parsed["seat_token"],
                 "seat_code": parsed["seat_code"],
                 "seat_number": parsed["seat_number"],
                 "status": parsed["status"],
             })
 
-    return seats
+    return results
 
 
 # ============================================================
-# GET SEAT LAYOUT FOR SESSION
+# RECURSIVELY FIND SHOW / SESSION INFORMATION
 # ============================================================
 
-def get_seat_layout(session_id, show_time):
+def find_sessions(obj):
+
+    sessions = []
+
+    if isinstance(obj, dict):
+
+        # Common BMS naming possibilities
+        possible_id_keys = [
+            "sessionId",
+            "sessionID",
+            "session_id",
+            "SessionId",
+            "SessionID",
+            "sessionCode",
+            "sessioncode",
+        ]
+
+        possible_time_keys = [
+            "showTime",
+            "showtime",
+            "show_time",
+            "ShowTime",
+            "time",
+            "sessionTime",
+            "sessiontime",
+        ]
+
+        session_id = None
+        show_time = None
+
+        for key in possible_id_keys:
+
+            if key in obj and obj[key] not in (None, ""):
+                session_id = str(obj[key])
+                break
+
+        for key in possible_time_keys:
+
+            if key in obj and obj[key] not in (None, ""):
+                show_time = str(obj[key])
+                break
+
+        if session_id:
+
+            sessions.append({
+                "session_id": session_id,
+                "show_time": show_time or "",
+            })
+
+        for value in obj.values():
+
+            sessions.extend(find_sessions(value))
+
+    elif isinstance(obj, list):
+
+        for value in obj:
+            sessions.extend(find_sessions(value))
+
+    return sessions
+
+
+# ============================================================
+# DEDUPLICATE SESSIONS
+# ============================================================
+
+def dedupe_sessions(sessions):
+
+    output = {}
+
+    for session in sessions:
+
+        sid = str(session.get("session_id", "")).strip()
+
+        if not sid:
+            continue
+
+        if sid not in output:
+
+            output[sid] = session
+
+        else:
+
+            if (
+                not output[sid].get("show_time")
+                and session.get("show_time")
+            ):
+                output[sid]["show_time"] = session["show_time"]
+
+    return list(output.values())
+
+
+# ============================================================
+# EXTRACT SHOWS FROM RESPONSE
+# ============================================================
+
+def extract_shows(data):
+
+    sessions = find_sessions(data)
+
+    sessions = dedupe_sessions(sessions)
+
+    return sessions
+
+
+# ============================================================
+# PRICE EXTRACTION
+#
+# This handles several possible BMS structures.
+# ============================================================
+
+def extract_prices(obj):
+
+    prices = {}
+
+    def walk(value):
+
+        if isinstance(value, dict):
+
+            # category + price style objects
+            category = None
+            price = None
+
+            for key in [
+                "category",
+                "categoryName",
+                "category_name",
+                "name",
+                "description",
+            ]:
+                if key in value and isinstance(value[key], str):
+                    category = value[key].strip()
+                    break
+
+            for key in [
+                "price",
+                "amount",
+                "ticketPrice",
+                "ticket_price",
+                "basePrice",
+            ]:
+                if key in value:
+                    try:
+                        price = float(value[key])
+                        break
+                    except Exception:
+                        pass
+
+            if category and price is not None:
+
+                category_upper = category.upper()
+
+                known_categories = [
+                    "RECLINER",
+                    "PREMIUM",
+                    "EXECUTIVE XL",
+                    "EXECUTIVE",
+                    "NORMAL",
+                ]
+
+                for known in known_categories:
+
+                    if known in category_upper:
+
+                        prices[known] = price
+
+            # Sometimes BMS uses categoryCode
+            category_code = value.get("categoryCode")
+
+            if category_code and price is not None:
+
+                code_map = {
+                    "A": "RECLINER",
+                    "B": "PREMIUM",
+                    "C": "EXECUTIVE XL",
+                    "D": "EXECUTIVE",
+                    "E": "NORMAL",
+                }
+
+                if str(category_code) in code_map:
+
+                    prices[
+                        code_map[str(category_code)]
+                    ] = price
+
+            for child in value.values():
+                walk(child)
+
+        elif isinstance(value, list):
+
+            for child in value:
+                walk(child)
+
+    walk(obj)
+
+    return prices
+
+
+# ============================================================
+# GOOGLE AUTH
+# ============================================================
+
+def get_google_credentials():
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    # Preferred GitHub Actions secret
+    b64_key = os.getenv("GCP_SA_KEY_B64")
+
+    if b64_key:
+
+        import base64
+
+        try:
+
+            decoded = base64.b64decode(b64_key).decode("utf-8")
+            info = json.loads(decoded)
+
+            return Credentials.from_service_account_info(
+                info,
+                scopes=scopes
+            )
+
+        except Exception as e:
+
+            print("GCP_SA_KEY_B64 failed:")
+            print(repr(e))
+
+    # JSON secret
+    raw_key = os.getenv("GCP_SA_KEY")
+
+    if raw_key:
+
+        try:
+
+            info = json.loads(raw_key)
+
+            return Credentials.from_service_account_info(
+                info,
+                scopes=scopes
+            )
+
+        except Exception as e:
+
+            print("GCP_SA_KEY failed:")
+            print(repr(e))
+
+    # Local development
+    if os.path.exists("credentials.json"):
+
+        return Credentials.from_service_account_file(
+            "credentials.json",
+            scopes=scopes
+        )
+
+    raise FileNotFoundError(
+        "Google credentials not found. "
+        "Set GCP_SA_KEY_B64 or GCP_SA_KEY."
+    )
+
+
+# ============================================================
+# GOOGLE SHEET
+# ============================================================
+
+def connect_google_sheet():
 
     print()
     print("=" * 70)
-    print(
-        f"PROCESSING SHOW {show_time} "
-        f"| SESSION {session_id}"
-    )
+    print("CONNECTING TO GOOGLE SHEETS")
     print("=" * 70)
 
-    # --------------------------------------------------------
-    # This is the seat-layout request used by the working
-    # single-show tracker.
-    # --------------------------------------------------------
+    credentials = get_google_credentials()
 
-    url = (
-        f"{BMS_BASE}/api/seatlayout/"
-        f"{EVENT_CODE}/{VENUE_CODE}/{session_id}"
-    )
+    client = gspread.authorize(credentials)
 
-    data = bms_request(url)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
-    if not data:
+    try:
+        seat_sheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
 
-        print(
-            f"FAILED: No seat layout for session {session_id}"
+        seat_sheet = spreadsheet.add_worksheet(
+            title=WORKSHEET_NAME,
+            rows=10000,
+            cols=30
         )
 
-        return []
+    try:
+        summary_sheet = spreadsheet.worksheet("BMS Summary")
+    except gspread.WorksheetNotFound:
 
-    # --------------------------------------------------------
-    # BMS normally returns:
-    #
-    # blnSuccess
-    # strData
-    # --------------------------------------------------------
-
-    if isinstance(data, dict):
-
-        success = data.get("blnSuccess")
-
-        if success is False:
-
-            exception = data.get(
-                "strException",
-                ""
-            )
-
-            exception_code = data.get(
-                "intException",
-                ""
-            )
-
-            print(
-                "BMS returned failure:"
-            )
-
-            print(
-                "Exception:",
-                exception_code
-            )
-
-            print(
-                exception
-            )
-
-            return []
-
-        str_data = data.get(
-            "strData",
-            ""
+        summary_sheet = spreadsheet.add_worksheet(
+            title="BMS Summary",
+            rows=1000,
+            cols=30
         )
 
-    else:
-
-        str_data = ""
-
-    if not str_data:
-
-        print(
-            f"FAILED: Empty strData for session {session_id}"
-        )
-
-        return []
-
-    seats = parse_seat_layout(
-        str_data,
-        show_time,
-        session_id
-    )
-
-    available = sum(
-        1 for seat in seats
-        if seat["status"] == "AVAILABLE"
-    )
-
-    sold = sum(
-        1 for seat in seats
-        if seat["status"] == "SOLD"
-    )
-
-    print()
-    print(
-        f"SEATS: {len(seats)} | "
-        f"AVAILABLE: {available} | "
-        f"SOLD: {sold}"
-    )
-
-    return seats
+    return seat_sheet, summary_sheet
 
 
 # ============================================================
-# GOOGLE SHEET WRITE
+# ENSURE HEADERS
 # ============================================================
 
-def write_to_sheet(worksheet, rows):
+def ensure_headers(sheet, headers):
 
-    if not rows:
+    existing = sheet.row_values(1)
+
+    if existing != headers:
 
         print()
-        print("No rows to write.")
+        print("Updating headers...")
 
+        sheet.update(
+            "A1",
+            [headers]
+        )
+
+
+# ============================================================
+# WRITE SEAT DATA
+# ============================================================
+
+def write_seats(sheet, rows):
+
+    if not rows:
+        print("No seat rows to write.")
         return
 
-    print()
-    print("=" * 70)
-    print("WRITING TO GOOGLE SHEET")
-    print("=" * 70)
+    ensure_headers(
+        sheet,
+        SEAT_HEADERS
+    )
 
-    # --------------------------------------------------------
-    # Make sure headers exist
-    # --------------------------------------------------------
+    # Clear old data
+    if sheet.row_count > 1:
 
-    existing_headers = worksheet.row_values(1)
-
-    if existing_headers != HEADERS_SHEET:
-
-        print(
-            "Updating Google Sheet headers..."
-        )
-
-        worksheet.update(
-            "A1:O1",
-            [HEADERS_SHEET]
-        )
-
-    # --------------------------------------------------------
-    # Clear old data.
-    #
-    # This run represents the current snapshot for all shows.
-    # --------------------------------------------------------
-
-    if worksheet.row_count > 1:
-
-        worksheet.batch_clear([
-            f"A2:O{worksheet.row_count}"
+        sheet.batch_clear([
+            f"A2:Q{sheet.row_count}"
         ])
 
     values = []
 
-    for seat in rows:
+    for row in rows:
 
         values.append([
-            seat["timestamp"],
-            seat["event_code"],
-            seat["venue_code"],
-            seat["session_id"],
-            seat["show_time"],
-            seat["date"],
-            seat["city"],
-            seat["row_number"],
-            seat["row_name"],
-            seat["category_code"],
-            seat["category"],
-            seat["seat_token"],
-            seat["seat_code"],
-            seat["seat_number"],
-            seat["status"],
+            row["timestamp"],
+            row["event_code"],
+            row["venue_code"],
+            row["session_id"],
+            row["show_time"],
+            row["date"],
+            row["city"],
+            row["row_number"],
+            row["row_name"],
+            row["category_code"],
+            row["category"],
+            row["seat_token"],
+            row["seat_code"],
+            row["seat_number"],
+            row["status"],
+            row["price"],
+            row["sold_gross"],
         ])
 
-    # --------------------------------------------------------
-    # Google Sheets has API payload limits.
-    # Write in chunks.
-    # --------------------------------------------------------
+    print()
+    print("Writing seat data...")
+    print(f"Rows: {len(values)}")
 
-    chunk_size = 500
+    sheet.update(
+        "A2",
+        values,
+        value_input_option="USER_ENTERED"
+    )
 
-    written = 0
 
-    for i in range(
-        0,
-        len(values),
-        chunk_size
-    ):
+# ============================================================
+# BUILD SUMMARY
+# ============================================================
 
-        chunk = values[
-            i:i + chunk_size
-        ]
+def build_summary(rows):
 
-        start_row = written + 2
-        end_row = start_row + len(chunk) - 1
+    grouped = {}
 
-        worksheet.update(
-            f"A{start_row}:O{end_row}",
-            chunk,
-            value_input_option="RAW"
+    for row in rows:
+
+        key = (
+            row["session_id"],
+            row["show_time"],
+            row["category"],
+            row["price"],
         )
 
-        written += len(chunk)
+        if key not in grouped:
 
-        print(
-            f"Written {written}/{len(values)} rows"
+            grouped[key] = {
+                "available": 0,
+                "sold": 0,
+            }
+
+        if row["status"] == "AVAILABLE":
+
+            grouped[key]["available"] += 1
+
+        elif row["status"] == "SOLD":
+
+            grouped[key]["sold"] += 1
+
+    timestamp = datetime.now(IST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    summary = []
+
+    for key, stats in grouped.items():
+
+        session_id = key[0]
+        show_time = key[1]
+        category = key[2]
+        price = key[3]
+
+        available = stats["available"]
+        sold = stats["sold"]
+
+        total = available + sold
+
+        if total:
+
+            occupancy = (
+                sold / total
+            ) * 100
+
+        else:
+
+            occupancy = 0
+
+        gross = sold * price
+
+        summary.append([
+            timestamp,
+            EVENT_CODE,
+            VENUE_CODE,
+            session_id,
+            show_time,
+            SHOW_DATE,
+            CITY,
+            category,
+            price,
+            available,
+            sold,
+            total,
+            round(occupancy, 2),
+            gross,
+        ])
+
+    return summary
+
+
+# ============================================================
+# WRITE SUMMARY
+# ============================================================
+
+def write_summary(sheet, rows):
+
+    ensure_headers(
+        sheet,
+        SUMMARY_HEADERS
+    )
+
+    if sheet.row_count > 1:
+
+        sheet.batch_clear([
+            f"A2:N{sheet.row_count}"
+        ])
+
+    if rows:
+
+        sheet.update(
+            "A2",
+            rows,
+            value_input_option="USER_ENTERED"
         )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("=" * 70)
+    print("BMS VENUE-LEVEL ALL-SHOW TRACKER")
+    print("=" * 70)
+
+    print(datetime.now(IST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    ))
 
     print()
-    print(
-        f"Google Sheet updated successfully. "
-        f"{written} seats written."
-    )
+    print("Event :", EVENT_CODE)
+    print("Venue :", VENUE_CODE)
+    print("Date  :", SHOW_DATE)
+    print("City  :", CITY)
 
-
-# ============================================================
-# PRINT SHOW SUMMARY
-# ============================================================
-
-def print_summary(show_results):
-
-    print()
-    print("=" * 90)
-    print("ALL SHOW SUMMARY")
-    print("=" * 90)
-
-    print(
-        f"{'TIME':<12}"
-        f"{'SESSION':<12}"
-        f"{'AVAILABLE':<12}"
-        f"{'SOLD':<10}"
-        f"{'TOTAL':<10}"
-    )
-
-    print("-" * 90)
-
-    total_available = 0
-    total_sold = 0
-
-    for result in show_results:
-
-        available = result["available"]
-        sold = result["sold"]
-        total = result["total"]
-
-        total_available += available
-        total_sold += sold
-
-        print(
-            f"{result['show_time']:<12}"
-            f"{result['session_id']:<12}"
-            f"{available:<12}"
-            f"{sold:<10}"
-            f"{total:<10}"
-        )
-
-    print("-" * 90)
-
-    print(
-        f"{'TOTAL':<24}"
-        f"{total_available:<12}"
-        f"{total_sold:<10}"
-        f"{total_available + total_sold:<10}"
-    )
-
-    print("=" * 90)
-
-
-# ============================================================
-# PARSER TEST
-# ============================================================
-
-def test_parser():
+    # --------------------------------------------------------
+    # TEST PARSER
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print("TESTING BMS SEAT PARSER")
+    print("TESTING SEAT PARSER")
     print("=" * 70)
 
-    tests = [
+    test_tokens = [
         "B1042+2",
         "B1043+3",
         "A1052+1",
@@ -1002,143 +936,335 @@ def test_parser():
         "B0+0",
     ]
 
-    for token in tests:
-
-        result = parse_seat_token(token)
+    for token in test_tokens:
 
         print(
-            f"{token:<15} -> {result}"
+            f"{token:<15} -> "
+            f"{parse_seat_token(token)}"
         )
 
-    print("=" * 70)
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
+    # --------------------------------------------------------
+    # REQUEST ONCE
+    # --------------------------------------------------------
 
     print()
     print("=" * 70)
-    print("Starting BMS ALL-SHOW Seat Tracker...")
+    print("REQUESTING BMS VENUE SEAT LAYOUT")
     print("=" * 70)
 
-    print(
-        datetime.datetime.now(IST).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+    data = request_bms()
+
+    if not data:
+
+        print("FAILED: No BMS response.")
+        return
+
+    bookmyshow = get_bookmyshow(data)
+
+    print()
+    print("BMS blnSuccess:")
+    print(bookmyshow.get("blnSuccess"))
+
+    print("BMS exception:")
+    print(bookmyshow.get("intException"))
+
+    if bookmyshow.get("strException"):
+        print("BMS message:")
+        print(bookmyshow.get("strException"))
+
+    # --------------------------------------------------------
+    # FIND STRDATA
+    # --------------------------------------------------------
+
+    str_data = find_strdata(data)
+
+    if not str_data:
+
+        print()
+        print("ERROR: strData not found.")
+
+        print()
+        print("Top-level response:")
+        print(json.dumps(data, indent=2)[:5000])
+
+        return
+
+    print()
+    print("strData length:", len(str_data))
+
+    # --------------------------------------------------------
+    # PARSE SEATS
+    # --------------------------------------------------------
+
+    seats = parse_seat_rows(str_data)
+
+    print()
+    print("=" * 70)
+    print("SEAT SUMMARY")
+    print("=" * 70)
+
+    available = sum(
+        1 for x in seats
+        if x["status"] == "AVAILABLE"
     )
 
-    test_parser()
+    sold = sum(
+        1 for x in seats
+        if x["status"] == "SOLD"
+    )
+
+    print("AVAILABLE:", available)
+    print("SOLD     :", sold)
+    print("TOTAL    :", len(seats))
+
+    if not seats:
+
+        print()
+        print("No seats parsed.")
+        return
 
     # --------------------------------------------------------
-    # Discover all shows
+    # SHOW DISCOVERY
     # --------------------------------------------------------
 
-    shows = discover_shows()
+    sessions = extract_shows(data)
 
-    if not shows:
+    print()
+    print("=" * 70)
+    print("SHOWS DISCOVERED")
+    print("=" * 70)
+
+    if sessions:
+
+        for i, session in enumerate(
+            sessions,
+            start=1
+        ):
+
+            print(
+                f"{i:02d}. "
+                f"{session['show_time']:<15} "
+                f"Session {session['session_id']}"
+            )
+
+    else:
 
         print(
-            "ERROR: No shows found."
+            "WARNING: No sessions could be extracted "
+            "from the response."
         )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # If the response contains session-specific seat blocks,
+    # parse them here.
+    #
+    # For the current BMS strData format, the seat layout itself
+    # does not contain a session ID, so we only assign a session
+    # when BMS actually supplies a matching session in the data.
+    # --------------------------------------------------------
+
+    # If only one seat layout is returned, associate it with
+    # the first session only rather than falsely copying the same
+    # seats to every show.
+
+    if sessions:
+
+        if len(sessions) == 1:
+
+            session_id = sessions[0]["session_id"]
+            show_time = sessions[0]["show_time"]
+
+        else:
+
+            # The venue-level response may expose multiple shows,
+            # but if the returned strData has only one seat map,
+            # do NOT duplicate it across every session.
+
+            print()
+            print(
+                "IMPORTANT: BMS returned multiple sessions but "
+                "only one seat-layout block."
+            )
+
+            print(
+                "The tracker will NOT copy one seat map "
+                "to every show."
+            )
+
+            print(
+                "This prevents incorrect box-office calculations."
+            )
+
+            # For now, use the first session only.
+            session_id = sessions[0]["session_id"]
+            show_time = sessions[0]["show_time"]
+
+    else:
+
+        session_id = ""
+        show_time = ""
+
+    # --------------------------------------------------------
+    # PRICE MAP
+    # --------------------------------------------------------
+
+    prices = extract_prices(data)
+
+    print()
+    print("=" * 70)
+    print("PRICE MAP")
+    print("=" * 70)
+
+    if prices:
+
+        for category, price in prices.items():
+
+            print(
+                f"{category:<20} ₹{price}"
+            )
+
+    else:
+
+        print(
+            "No prices were found in the JSON response."
+        )
+
+    # --------------------------------------------------------
+    # BUILD FINAL SEAT ROWS
+    # --------------------------------------------------------
+
+    timestamp = datetime.now(IST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+    final_rows = []
+
+    for seat in seats:
+
+        category = seat["category"]
+
+        price = prices.get(
+            category,
+            0
+        )
+
+        sold_gross = (
+            price
+            if seat["status"] == "SOLD"
+            else 0
+        )
+
+        final_rows.append({
+
+            "timestamp": timestamp,
+
+            "event_code": EVENT_CODE,
+
+            "venue_code": VENUE_CODE,
+
+            "session_id": session_id,
+
+            "show_time": show_time,
+
+            "date": SHOW_DATE,
+
+            "city": CITY,
+
+            "row_number": seat["row_number"],
+
+            "row_name": seat["row_name"],
+
+            "category_code": seat["category_code"],
+
+            "category": category,
+
+            "seat_token": seat["seat_token"],
+
+            "seat_code": seat["seat_code"],
+
+            "seat_number": seat["seat_number"],
+
+            "status": seat["status"],
+
+            "price": price,
+
+            "sold_gross": sold_gross,
+        })
+
+    # --------------------------------------------------------
+    # GOOGLE SHEETS
+    # --------------------------------------------------------
+
+    try:
+
+        seat_sheet, summary_sheet = (
+            connect_google_sheet()
+        )
+
+    except Exception as e:
+
+        print()
+        print("ERROR connecting to Google Sheets:")
+        print(repr(e))
 
         return
 
     # --------------------------------------------------------
-    # Connect Google Sheets
+    # WRITE SEATS
     # --------------------------------------------------------
 
-    worksheet = connect_google_sheets()
-
-    all_seats = []
-
-    show_results = []
-
-    # --------------------------------------------------------
-    # Process every show
-    # --------------------------------------------------------
-
-    for index, (
-        show_time,
-        session_id
-    ) in enumerate(shows, 1):
-
-        print()
-        print(
-            f"SHOW {index}/{len(shows)}"
-        )
-
-        seats = get_seat_layout(
-            session_id,
-            show_time
-        )
-
-        if not seats:
-
-            show_results.append({
-                "show_time": show_time,
-                "session_id": session_id,
-                "available": 0,
-                "sold": 0,
-                "total": 0,
-            })
-
-            # Small delay even after failure
-            time.sleep(3)
-
-            continue
-
-        available = sum(
-            1
-            for seat in seats
-            if seat["status"] == "AVAILABLE"
-        )
-
-        sold = sum(
-            1
-            for seat in seats
-            if seat["status"] == "SOLD"
-        )
-
-        show_results.append({
-            "show_time": show_time,
-            "session_id": session_id,
-            "available": available,
-            "sold": sold,
-            "total": len(seats),
-        })
-
-        all_seats.extend(seats)
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Do not hammer BMS between sessions.
-        # ----------------------------------------------------
-
-        time.sleep(5)
-
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
-
-    print_summary(
-        show_results
+    write_seats(
+        seat_sheet,
+        final_rows
     )
 
     # --------------------------------------------------------
-    # Google Sheets
+    # SUMMARY
     # --------------------------------------------------------
 
-    write_to_sheet(
-        worksheet,
-        all_seats
+    summary_rows = build_summary(
+        final_rows
+    )
+
+    write_summary(
+        summary_sheet,
+        summary_rows
+    )
+
+    # --------------------------------------------------------
+    # FINAL
+    # --------------------------------------------------------
+
+    total_gross = sum(
+        row["sold_gross"]
+        for row in final_rows
     )
 
     print()
     print("=" * 70)
-    print("BMS ALL-SHOW TRACKING COMPLETED")
+    print("FINAL RESULT")
+    print("=" * 70)
+
+    print(
+        f"Seats written : {len(final_rows)}"
+    )
+
+    print(
+        f"Available     : {available}"
+    )
+
+    print(
+        f"Sold          : {sold}"
+    )
+
+    print(
+        f"Gross         : ₹{total_gross:,.2f}"
+    )
+
+    print()
+    print("Google Sheet updated successfully.")
     print("=" * 70)
 
 
