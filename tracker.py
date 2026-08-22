@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import datetime
 import gspread
 
@@ -16,18 +17,91 @@ SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 SHEET_TAB_NAME = "Kurla_26Aug"
 
 TARGET_DATE = "2026-08-26"
-
 TARGET_MOVIE = "Toxic"
+TARGET_THEATRE = "PVR Market City, Kurla (W), Mumbai"
 
-THEATRE_NAME = "PVR Market City, Kurla (W), Mumbai"
+BFILMY_URL = "https://bfilmy.pages.dev/District%20Advance/"
 
-DISTRICT_URL = (
-    "https://www.district.in/movies/"
-    "pvr-market-city-kurla-w-mumbai-in-mumbai-CD1022270"
-    f"?date={TARGET_DATE}"
-)
+DEBUG_FILE = "bfilmy_debug.json"
 
-DEBUG_FILE = "district_page_debug.json"
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def contains_toxic(value):
+    if value is None:
+        return False
+
+    text = str(value).lower()
+
+    return (
+        "toxic" in text
+        or "fairy tale for grown" in text
+    )
+
+
+def safe_json(value):
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False
+        )
+    except Exception:
+        return str(value)
+
+
+def search_json(obj, path="$", results=None):
+
+    if results is None:
+        results = []
+
+    try:
+
+        if isinstance(obj, dict):
+
+            for key, value in obj.items():
+
+                current_path = f"{path}.{key}"
+
+                # Search key/value itself
+                if contains_toxic(key) or contains_toxic(value):
+
+                    results.append({
+                        "path": current_path,
+                        "key": key,
+                        "value": value
+                    })
+
+                search_json(
+                    value,
+                    current_path,
+                    results
+                )
+
+        elif isinstance(obj, list):
+
+            for i, value in enumerate(obj):
+
+                search_json(
+                    value,
+                    f"{path}[{i}]",
+                    results
+                )
+
+        elif isinstance(obj, str):
+
+            if contains_toxic(obj):
+
+                results.append({
+                    "path": path,
+                    "value": obj
+                })
+
+    except Exception:
+        pass
+
+    return results
 
 
 # ============================================================
@@ -37,7 +111,7 @@ DEBUG_FILE = "district_page_debug.json"
 def run():
 
     print("\n==============================================")
-    print("DISTRICT PAGE DIAGNOSTIC")
+    print("BFILMY DISTRICT ADVANCE BOOKING DIAGNOSTIC")
     print("==============================================\n")
 
     # --------------------------------------------------------
@@ -72,7 +146,7 @@ def run():
         sheet = spreadsheet.add_worksheet(
             title=SHEET_TAB_NAME,
             rows=1000,
-            cols=15
+            cols=20
         )
 
     # --------------------------------------------------------
@@ -97,24 +171,20 @@ def run():
 
     debug = {
         "timestamp_ist": now_ist,
+        "source": BFILMY_URL,
         "target_date": TARGET_DATE,
         "target_movie": TARGET_MOVIE,
-        "theatre": THEATRE_NAME,
-        "requested_url": DISTRICT_URL,
-
-        "page": {},
-        "console": [],
-        "page_errors": [],
+        "target_theatre": TARGET_THEATRE,
         "requests": [],
         "responses": [],
-        "cookies": [],
-        "html": "",
-        "body_text": ""
+        "json_matches": [],
+        "dom_text": "",
+        "page": {}
     }
 
-    # --------------------------------------------------------
-    # Browser
-    # --------------------------------------------------------
+    # ========================================================
+    # PLAYWRIGHT
+    # ========================================================
 
     print("\n2. Launching Chromium...")
 
@@ -127,8 +197,7 @@ def run():
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
+                "--disable-dev-shm-usage"
             ]
         )
 
@@ -145,91 +214,25 @@ def run():
 
             viewport={
                 "width": 1440,
-                "height": 900
+                "height": 1000
             },
 
             locale="en-IN",
 
-            timezone_id="Asia/Kolkata",
-
-            java_script_enabled=True,
-
-            ignore_https_errors=False
+            timezone_id="Asia/Kolkata"
         )
 
         page = context.new_page()
 
         # ----------------------------------------------------
-        # Console
-        # ----------------------------------------------------
-
-        def on_console(msg):
-
-            try:
-
-                entry = {
-                    "type": msg.type,
-                    "text": msg.text
-                }
-
-                debug["console"].append(
-                    entry
-                )
-
-                print(
-                    "[CONSOLE]",
-                    msg.type,
-                    msg.text[:500]
-                )
-
-            except Exception:
-                pass
-
-        page.on(
-            "console",
-            on_console
-        )
-
-        # ----------------------------------------------------
-        # Page errors
-        # ----------------------------------------------------
-
-        def on_page_error(error):
-
-            try:
-
-                text = str(error)
-
-                debug[
-                    "page_errors"
-                ].append(
-                    text
-                )
-
-                print(
-                    "[PAGE ERROR]",
-                    text
-                )
-
-            except Exception:
-                pass
-
-        page.on(
-            "pageerror",
-            on_page_error
-        )
-
-        # ----------------------------------------------------
-        # Requests
+        # REQUESTS
         # ----------------------------------------------------
 
         def on_request(request):
 
             try:
 
-                debug[
-                    "requests"
-                ].append({
+                debug["requests"].append({
                     "method": request.method,
                     "url": request.url,
                     "resource_type":
@@ -240,7 +243,7 @@ def run():
                     "[REQUEST]",
                     request.resource_type,
                     request.method,
-                    request.url[:300]
+                    request.url[:500]
                 )
 
             except Exception:
@@ -252,90 +255,139 @@ def run():
         )
 
         # ----------------------------------------------------
-        # Responses
+        # RESPONSES
         # ----------------------------------------------------
 
         def on_response(response):
 
             try:
 
-                debug[
-                    "responses"
-                ].append({
+                content_type = (
+                    response.headers.get(
+                        "content-type",
+                        ""
+                    ).lower()
+                )
+
+                record = {
                     "status": response.status,
                     "url": response.url,
                     "resource_type":
                         response.request.resource_type,
                     "content_type":
-                        response.headers.get(
-                            "content-type",
-                            ""
+                        content_type
+                }
+
+                # ------------------------------------------------
+                # JSON
+                # ------------------------------------------------
+
+                if "json" in content_type:
+
+                    try:
+
+                        body = response.text()
+
+                        parsed = json.loads(
+                            body
                         )
-                })
 
-                # Print non-success responses
-                if response.status >= 400:
+                        record["json"] = parsed
 
-                    print(
-                        "[HTTP ERROR]",
-                        response.status,
-                        response.url[:400]
-                    )
+                        matches = search_json(
+                            parsed
+                        )
 
-            except Exception:
-                pass
+                        if matches:
+
+                            print(
+                                "\n*** TOXIC FOUND IN JSON ***"
+                            )
+
+                            print(
+                                response.url
+                            )
+
+                            debug[
+                                "json_matches"
+                            ].append({
+                                "url":
+                                    response.url,
+                                "matches":
+                                    matches
+                            })
+
+                    except Exception as e:
+
+                        record[
+                            "json_error"
+                        ] = str(e)
+
+                debug[
+                    "responses"
+                ].append(record)
+
+            except Exception as e:
+
+                print(
+                    "Response error:",
+                    e
+                )
 
         page.on(
             "response",
             on_response
         )
 
-        # ----------------------------------------------------
-        # Open District
-        # ----------------------------------------------------
+        # ====================================================
+        # OPEN BFILMY
+        # ====================================================
 
-        print("\n3. Opening District URL:")
-        print(DISTRICT_URL)
+        print(
+            "\n3. Opening BFilmy:"
+        )
 
-        response = None
+        print(
+            BFILMY_URL
+        )
 
         try:
 
             response = page.goto(
-                DISTRICT_URL,
+                BFILMY_URL,
                 wait_until="domcontentloaded",
                 timeout=60000
             )
 
             if response:
 
+                debug["page"][
+                    "status"
+                ] = response.status
+
+                debug["page"][
+                    "response_url"
+                ] = response.url
+
                 print(
-                    "\nInitial HTTP status:",
+                    "HTTP status:",
                     response.status
                 )
 
                 print(
-                    "Initial response URL:",
+                    "Response URL:",
                     response.url
                 )
-
-                debug["page"][
-                    "initial_status"
-                ] = response.status
-
-                debug["page"][
-                    "initial_response_url"
-                ] = response.url
 
         except Exception as e:
 
             print(
-                "\nPAGE.GOTO ERROR:",
+                "Navigation error:",
                 repr(e)
             )
 
             debug["page"][
-                "goto_error"
+                "navigation_error"
             ] = repr(e)
 
         # ----------------------------------------------------
@@ -343,16 +395,52 @@ def run():
         # ----------------------------------------------------
 
         print(
-            "\n4. Waiting for District JavaScript..."
+            "\n4. Waiting for BFilmy application..."
         )
 
         page.wait_for_timeout(
-            10000
+            8000
         )
 
         # ----------------------------------------------------
-        # Current URL
+        # Scroll
         # ----------------------------------------------------
+
+        print(
+            "\n5. Scrolling..."
+        )
+
+        for _ in range(8):
+
+            try:
+
+                page.mouse.wheel(
+                    0,
+                    1200
+                )
+
+            except Exception:
+                pass
+
+            page.wait_for_timeout(
+                1000
+            )
+
+        # ----------------------------------------------------
+        # Extra wait
+        # ----------------------------------------------------
+
+        page.wait_for_timeout(
+            5000
+        )
+
+        # ====================================================
+        # PAGE INFO
+        # ====================================================
+
+        print(
+            "\n6. Reading page..."
+        )
 
         try:
 
@@ -360,132 +448,102 @@ def run():
                 "final_url"
             ] = page.url
 
+            debug["page"][
+                "title"
+            ] = page.title()
+
             print(
-                "\nFinal URL:",
+                "Final URL:",
                 page.url
+            )
+
+            print(
+                "Title:",
+                page.title()
             )
 
         except Exception:
             pass
 
-        # ----------------------------------------------------
-        # Title
-        # ----------------------------------------------------
+        # ====================================================
+        # BODY TEXT
+        # ====================================================
 
         try:
 
-            title = page.title()
+            body = page.locator(
+                "body"
+            ).inner_text()
 
-            debug["page"][
-                "title"
-            ] = title
+            debug[
+                "dom_text"
+            ] = body[:1000000]
 
             print(
-                "Page title:",
-                title
+                "\nBODY TEXT PREVIEW:"
             )
+
+            print(
+                body[:15000]
+            )
+
+            if contains_toxic(body):
+
+                print(
+                    "\n*** TOXIC FOUND IN PAGE ***"
+                )
+
+            else:
+
+                print(
+                    "\nToxic not found in visible page text."
+                )
 
         except Exception as e:
 
             print(
-                "Title error:",
+                "Body error:",
                 repr(e)
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # HTML
-        # ----------------------------------------------------
-
-        print(
-            "\n5. Capturing HTML..."
-        )
+        # ====================================================
 
         try:
 
             html = page.content()
 
-            debug[
-                "html"
-            ] = html[:3000000]
+            debug["page"][
+                "html_size"
+            ] = len(html)
+
+            debug["page"][
+                "html_preview"
+            ] = html[:10000]
 
             print(
-                "HTML size:",
+                "\nHTML size:",
                 len(html)
             )
 
-            print(
-                "HTML preview:"
-            )
+        except Exception:
+            pass
 
-            print(
-                html[:2000]
-            )
-
-        except Exception as e:
-
-            print(
-                "HTML error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # Body text
-        # ----------------------------------------------------
-
-        print(
-            "\n6. Capturing visible body text..."
-        )
-
-        try:
-
-            body_text = page.locator(
-                "body"
-            ).inner_text(
-                timeout=10000
-            )
-
-            debug[
-                "body_text"
-            ] = body_text[:500000]
-
-            print(
-                "Body text length:",
-                len(body_text)
-            )
-
-            print(
-                "\nBODY TEXT:"
-            )
-
-            print(
-                body_text[:10000]
-            )
-
-        except Exception as e:
-
-            print(
-                "Body text error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # Screenshot
-        # ----------------------------------------------------
-
-        print(
-            "\n7. Taking screenshot..."
-        )
+        # ====================================================
+        # SCREENSHOT
+        # ====================================================
 
         try:
 
             page.screenshot(
-                path="district_page.png",
+                path="bfilmy_page.png",
                 full_page=True
             )
 
             debug["page"][
                 "screenshot"
-            ] = "district_page.png"
+            ] = "bfilmy_page.png"
 
             print(
                 "Screenshot saved."
@@ -498,57 +556,17 @@ def run():
                 repr(e)
             )
 
-        # ----------------------------------------------------
-        # Cookies
-        # ----------------------------------------------------
-
-        print(
-            "\n8. Capturing cookies..."
-        )
+        # ====================================================
+        # LOCAL STORAGE
+        # ====================================================
 
         try:
 
-            cookies = context.cookies()
-
-            # Only save safe metadata.
-            debug[
-                "cookies"
-            ] = [
-                {
-                    "name": c.get("name"),
-                    "domain": c.get("domain"),
-                    "path": c.get("path"),
-                    "expires": c.get("expires")
-                }
-                for c in cookies
-            ]
-
-            print(
-                "Cookies:",
-                len(cookies)
-            )
-
-        except Exception as e:
-
-            print(
-                "Cookie error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # Browser local storage keys
-        # ----------------------------------------------------
-
-        print(
-            "\n9. Checking local storage..."
-        )
-
-        try:
-
-            local_storage = page.evaluate(
+            storage = page.evaluate(
                 """
                 () => {
                     const result = {};
+
                     for (
                         let i = 0;
                         i < localStorage.length;
@@ -560,6 +578,7 @@ def run():
                         result[key] =
                             localStorage.getItem(key);
                     }
+
                     return result;
                 }
                 """
@@ -567,157 +586,24 @@ def run():
 
             debug["page"][
                 "local_storage"
-            ] = local_storage
+            ] = storage
 
             print(
-                "Local storage keys:",
-                list(
-                    local_storage.keys()
-                )
+                "\nLocalStorage keys:",
+                list(storage.keys())
             )
 
-        except Exception as e:
-
-            print(
-                "Local storage error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # Session storage
-        # ----------------------------------------------------
-
-        print(
-            "\n10. Checking session storage..."
-        )
-
-        try:
-
-            session_storage = page.evaluate(
-                """
-                () => {
-                    const result = {};
-                    for (
-                        let i = 0;
-                        i < sessionStorage.length;
-                        i++
-                    ) {
-                        const key =
-                            sessionStorage.key(i);
-
-                        result[key] =
-                            sessionStorage.getItem(key);
-                    }
-                    return result;
-                }
-                """
-            )
-
-            debug["page"][
-                "session_storage"
-            ] = session_storage
-
-            print(
-                "Session storage keys:",
-                list(
-                    session_storage.keys()
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                "Session storage error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # Meta information
-        # ----------------------------------------------------
-
-        print(
-            "\n11. Checking page metadata..."
-        )
-
-        try:
-
-            metadata = page.evaluate(
-                """
-                () => {
-                    return {
-                        readyState:
-                            document.readyState,
-
-                        visibility:
-                            document.visibilityState,
-
-                        charset:
-                            document.characterSet,
-
-                        referrer:
-                            document.referrer,
-
-                        domain:
-                            document.domain,
-
-                        scripts:
-                            Array.from(
-                                document.scripts
-                            ).map(
-                                s => s.src
-                            ).filter(Boolean),
-
-                        links:
-                            Array.from(
-                                document.querySelectorAll(
-                                    "link"
-                                )
-                            ).map(
-                                l => l.href
-                            ).filter(Boolean)
-                    };
-                }
-                """
-            )
-
-            debug["page"][
-                "metadata"
-            ] = metadata
-
-            print(
-                json.dumps(
-                    metadata,
-                    indent=2
-                )[:10000]
-            )
-
-        except Exception as e:
-
-            print(
-                "Metadata error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # Wait again for late network
-        # ----------------------------------------------------
-
-        print(
-            "\n12. Final 5-second network wait..."
-        )
-
-        page.wait_for_timeout(
-            5000
-        )
+        except Exception:
+            pass
 
         browser.close()
 
     # ========================================================
-    # SAVE DEBUG FILE
+    # SAVE DEBUG
     # ========================================================
 
     print(
-        "\n13. Saving diagnostic file..."
+        "\n7. Saving debug file..."
     )
 
     with open(
@@ -743,102 +629,46 @@ def run():
     # ========================================================
 
     print(
-        "\n14. Writing diagnostic status to Google Sheet..."
+        "\n8. Updating Google Sheet..."
     )
-
-    header = [
-        "Snapshot Timestamp (IST)",
-        "Show Date",
-        "Theatre",
-        "Movie",
-        "HTTP Status",
-        "Final URL",
-        "Page Title",
-        "HTML Size",
-        "Body Text Size",
-        "XHR/Fetch Requests",
-        "Total Requests",
-        "HTTP Errors",
-        "Page Errors",
-        "Toxic Found",
-        "Diagnostic File"
-    ]
 
     existing = sheet.get_all_values()
 
     if not existing:
 
         sheet.append_row(
-            header,
+            [
+                "Timestamp IST",
+                "Date",
+                "Theatre",
+                "Movie",
+                "Source",
+                "HTTP Status",
+                "Final URL",
+                "Page Title",
+                "Requests",
+                "JSON Responses",
+                "Toxic Found",
+                "Status"
+            ],
             value_input_option="USER_ENTERED"
         )
 
-    initial_status = debug[
-        "page"
-    ].get(
-        "initial_status",
-        ""
-    )
-
-    final_url = debug[
-        "page"
-    ].get(
-        "final_url",
-        ""
-    )
-
-    title = debug[
-        "page"
-    ].get(
-        "title",
-        ""
-    )
-
-    html_size = len(
-        debug.get(
-            "html",
-            ""
-        )
-    )
-
-    body_size = len(
-        debug.get(
-            "body_text",
-            ""
-        )
-    )
-
-    xhr_fetch = sum(
-        1
-        for r in debug[
-            "requests"
-        ]
-        if r.get(
-            "resource_type"
-        ) in [
-            "xhr",
-            "fetch"
-        ]
-    )
-
-    http_errors = sum(
-        1
-        for r in debug[
-            "responses"
-        ]
-        if r.get(
-            "status",
-            0
-        ) >= 400
-    )
-
     toxic_found = (
         "YES"
-        if "toxic" in (
-            debug.get(
-                "body_text",
-                ""
-            ).lower()
+        if (
+            contains_toxic(
+                debug.get(
+                    "dom_text",
+                    ""
+                )
+            )
+            or len(
+                debug.get(
+                    "json_matches",
+                    []
+                )
+            ) > 0
         )
         else "NO"
     )
@@ -847,33 +677,35 @@ def run():
         [
             now_ist,
             TARGET_DATE,
-            THEATRE_NAME,
+            TARGET_THEATRE,
             TARGET_MOVIE,
-            initial_status,
-            final_url,
-            title,
-            html_size,
-            body_size,
-            xhr_fetch,
-            len(
-                debug[
-                    "requests"
-                ]
+            BFILMY_URL,
+            debug["page"].get(
+                "status",
+                ""
             ),
-            http_errors,
+            debug["page"].get(
+                "final_url",
+                ""
+            ),
+            debug["page"].get(
+                "title",
+                ""
+            ),
             len(
-                debug[
-                    "page_errors"
-                ]
+                debug["requests"]
+            ),
+            len(
+                debug["responses"]
             ),
             toxic_found,
-            DEBUG_FILE
+            "Diagnostic complete"
         ],
         value_input_option="USER_ENTERED"
     )
 
     # ========================================================
-    # FINAL SUMMARY
+    # SUMMARY
     # ========================================================
 
     print(
@@ -881,7 +713,7 @@ def run():
     )
 
     print(
-        "DIAGNOSTIC COMPLETE"
+        "BFILMY DIAGNOSTIC COMPLETE"
     )
 
     print(
@@ -890,78 +722,68 @@ def run():
 
     print(
         "HTTP Status:",
-        initial_status
+        debug["page"].get(
+            "status",
+            ""
+        )
     )
 
     print(
         "Final URL:",
-        final_url
+        debug["page"].get(
+            "final_url",
+            ""
+        )
     )
 
     print(
         "Page Title:",
-        title
+        debug["page"].get(
+            "title",
+            ""
+        )
     )
 
     print(
-        "HTML Size:",
-        html_size
-    )
-
-    print(
-        "Body Text Size:",
-        body_size
-    )
-
-    print(
-        "Total Requests:",
+        "Requests:",
         len(
             debug["requests"]
         )
     )
 
     print(
-        "XHR/Fetch:",
-        xhr_fetch
-    )
-
-    print(
-        "HTTP Errors:",
-        http_errors
-    )
-
-    print(
-        "Page Errors:",
+        "Responses:",
         len(
-            debug[
-                "page_errors"
-            ]
+            debug["responses"]
         )
     )
 
     print(
-        "Toxic Found:",
+        "Toxic JSON matches:",
+        len(
+            debug["json_matches"]
+        )
+    )
+
+    print(
+        "Toxic in DOM:",
         toxic_found
     )
 
     print(
-        "\nFiles created:"
+        "\nFiles:"
     )
 
     print(
-        "district_page_debug.json"
+        "bfilmy_debug.json"
     )
 
     print(
-        "district_page.png"
+        "bfilmy_page.png"
     )
 
     print(
-        "\nUpload district_page_debug.json here."
-    )
-
-    print(
-        "If necessary, also upload district_page.png."
+        "\nSend me the GitHub Actions output after this run."
     )
 
 
