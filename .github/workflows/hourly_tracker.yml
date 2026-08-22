@@ -19,8 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright gspread google-auth
-          playwright install --with-deps chromium
+          pip install curl_cffi beautifulsoup4 gspread google-auth
 
       - name: Run Box Office Tracker
         env:
