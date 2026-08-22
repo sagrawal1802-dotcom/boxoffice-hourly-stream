@@ -8,8 +8,7 @@ from datetime import datetime
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+from curl_cffi import requests
 
 
 # ============================================================
@@ -28,8 +27,7 @@ VENUE_CODE = "CSWO"
 SHOW_DATE = "20260826"
 CITY = "mumbai"
 
-DELAY_BETWEEN_SHOWS = 6
-PAGE_TIMEOUT = 45000
+DELAY_BETWEEN_SHOWS = 3
 
 GCP_SA_KEY = (
     os.environ.get("GCP_SA_KEY_B64")
@@ -129,17 +127,19 @@ def init_google_sheet():
     try:
         sheet = spreadsheet.worksheet(SHEET_TAB_NAME)
     except gspread.WorksheetNotFound:
+        print(f"Creating worksheet: {SHEET_TAB_NAME}")
         sheet = spreadsheet.add_worksheet(title=SHEET_TAB_NAME, rows=50000, cols=len(HEADERS))
 
     existing = sheet.get_all_values()
     if not existing:
+        print("Adding headers...")
         sheet.append_row(HEADERS, value_input_option="USER_ENTERED")
 
     print("Google Sheets connected.")
     return sheet
 
 
-def write_rows_in_batches(sheet, rows, batch_size=2000):
+def write_rows_in_batches(sheet, rows, batch_size=2500):
     if not rows:
         print("No rows to write.")
         return
@@ -154,25 +154,11 @@ def write_rows_in_batches(sheet, rows, batch_size=2000):
 
 
 # ============================================================
-# SHOW PROCESSOR WITH DYNAMIC INTERCEPTION
+# SHOW PROCESSOR WITH TLS IMPERSONATION
 # ============================================================
 
-def process_show(page, show_time, session_id):
+def process_show(session, show_time, session_id):
     banner(f"PROCESSING SHOW {show_time} | SESSION {session_id}")
-
-    captured_tokens = set()
-
-    def intercept_network(response):
-        try:
-            # BMS returns layout or seat strings in internal AJAX responses
-            if any(k in response.url.lower() for k in ["seatlayout", "seat-layout", "shows", "layout"]):
-                body = response.text()
-                for token in re.findall(r"\b[A-E][12]\d+\+\d+\b", body):
-                    captured_tokens.add(token)
-        except Exception:
-            pass
-
-    page.on("response", intercept_network)
 
     url = (
         f"https://in.bookmyshow.com/movies/"
@@ -183,43 +169,36 @@ def process_show(page, show_time, session_id):
         f"{SHOW_DATE}"
     )
 
-    print(f"Navigating to: {url}")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8",
+        "Referer": f"https://in.bookmyshow.com/buytickets/{EVENT_CODE}-{CITY}/movie-{CITY}-{EVENT_CODE}-MT/{SHOW_DATE}",
+    }
 
     try:
-        response = page.goto(
-            url,
-            wait_until="commit",
-            timeout=PAGE_TIMEOUT,
-            referer=f"https://in.bookmyshow.com/buytickets/{EVENT_CODE}-{CITY}/movie-{CITY}-{EVENT_CODE}-MT/{SHOW_DATE}"
-        )
-        status = response.status if response else "None"
-        print(f"Initial HTTP status: {status}")
+        response = session.get(url, headers=headers, impersonate="chrome124", timeout=30)
+        print(f"HTTP Status: {response.status_code}")
 
-        if status == 403:
-            print("Received 403 Forbidden. Akamai Datacenter IP or Bot challenge triggered.")
+        if response.status_code != 200:
+            print(f"Failed to fetch page. Status: {response.status_code}")
+            return []
 
     except Exception as error:
-        print(f"Navigation error: {error}")
+        print(f"Request error: {error}")
+        return []
 
-    # Wait for React mount and background XHRs to complete
-    page.wait_for_timeout(7000)
+    # Extract tokens from the server-rendered HTML/state script
+    html_content = response.text
+    matches = re.findall(r"\b[A-E][12]\d+\+\d+\b", html_content)
+    tokens = list(dict.fromkeys(matches))
 
-    # Secondary sweep across full rendered page markup
-    try:
-        content = page.content()
-        for token in re.findall(r"\b[A-E][12]\d+\+\d+\b", content):
-            captured_tokens.add(token)
-    except Exception:
-        pass
-
-    page.remove_listener("response", intercept_network)
-
-    print(f"Captured seat tokens: {len(captured_tokens)}")
+    print(f"Extracted potential seat tokens: {len(tokens)}")
 
     timestamp = get_ist_timestamp()
     unique_rows = {}
 
-    for token in captured_tokens:
+    for token in tokens:
         if token in ("A0+0", "B0+0", "C0+0", "D0+0", "E0+0"):
             continue
 
@@ -276,68 +255,30 @@ def main():
     successful_shows = 0
     failed_shows = 0
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1920,1080",
-            ]
-        )
+    session = requests.Session()
 
-        context = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-            extra_http_headers={
-                "Accept-Language": "en-IN,en;q=0.9",
-                "Sec-Ch-Ua": '"Not/A)Brand";v="8", "Chromium";v="127", "Google Chrome";v="127"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1"
-            }
-        )
+    # Pre-warm cookies using browser TLS fingerprint
+    try:
+        home_url = f"https://in.bookmyshow.com/explore/movies-{CITY}"
+        session.get(home_url, impersonate="chrome124", timeout=20)
+    except Exception as e:
+        print(f"Session warm-up notice: {e}")
 
-        page = context.new_page()
-        stealth_sync(page)
-
-        # 1. Warm up by browsing to the showtimes / movie listing page
-        print("Warming up session on BMS BuyTickets page...")
+    for index, (show_time, session_id) in enumerate(KNOWN_SHOWS, start=1):
+        print(f"\nSHOW {index}/{len(KNOWN_SHOWS)}")
         try:
-            showtimes_url = f"https://in.bookmyshow.com/buytickets/{EVENT_CODE}-{CITY}/movie-{CITY}-{EVENT_CODE}-MT/{SHOW_DATE}"
-            page.goto(showtimes_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(4000)
-        except Exception as e:
-            print(f"Warm-up notice: {e}")
-
-        # 2. Iterate through each show
-        for index, (show_time, session_id) in enumerate(KNOWN_SHOWS, start=1):
-            print(f"\nSHOW {index}/{len(KNOWN_SHOWS)}")
-            try:
-                rows = process_show(page, show_time, session_id)
-                if rows:
-                    all_rows.extend(rows)
-                    successful_shows += 1
-                else:
-                    failed_shows += 1
-            except Exception as error:
-                print(f"FAILED SHOW {session_id}: {error}")
+            rows = process_show(session, show_time, session_id)
+            if rows:
+                all_rows.extend(rows)
+                successful_shows += 1
+            else:
                 failed_shows += 1
+        except Exception as error:
+            print(f"FAILED SHOW {session_id}: {error}")
+            failed_shows += 1
 
-            if index < len(KNOWN_SHOWS):
-                time.sleep(DELAY_BETWEEN_SHOWS)
-
-        context.close()
-        browser.close()
+        if index < len(KNOWN_SHOWS):
+            time.sleep(DELAY_BETWEEN_SHOWS)
 
     if all_rows:
         write_rows_in_batches(sheet, all_rows)
