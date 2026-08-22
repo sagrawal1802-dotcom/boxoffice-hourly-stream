@@ -3,12 +3,15 @@ name: Hourly Box Office Stream
 on:
   schedule:
     - cron: '0 * * * *'
+
   workflow_dispatch:
 
 jobs:
   track:
     runs-on: ubuntu-latest
+
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -19,9 +22,25 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install curl_cffi beautifulsoup4 lxml gspread google-auth
+
+      - name: Check files
+        run: |
+          echo "Current directory:"
+          pwd
+
+          echo "Repository files:"
+          ls -la
+
+          echo "Checking tracker.py:"
+          test -f tracker.py
 
       - name: Run Box Office Tracker
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: python tracker.py
+        run: |
+          echo "Starting Box Office Tracker..."
+          date
+          python -u tracker.py
+          echo "Tracker finished."
