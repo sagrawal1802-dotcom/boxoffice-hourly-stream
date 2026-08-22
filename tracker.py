@@ -9,234 +9,61 @@ from playwright.sync_api import sync_playwright
 
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 
+DEBUG_FILE = "bms_debug.txt"
 
-# ---------------------------------------------------------
-# TICKET PARSER
-# ---------------------------------------------------------
 
-def parse_tickets(raw_str):
-    if raw_str is None:
-        return 0
+def write_debug(text):
+    print(text)
 
-    text = str(raw_str).strip()
+    with open(
+        DEBUG_FILE,
+        "a",
+        encoding="utf-8"
+    ) as f:
+        f.write(text + "\n")
 
-    # Examples:
-    # 1.2K -> 1200
-    # 2K -> 2000
-    # 850 -> 850
-    # 1.5M -> 1500000
-
-    match = re.search(r"(\d+(?:\.\d+)?)\s*([KM]?)", text, re.IGNORECASE)
-
-    if not match:
-        return 0
-
-    number = float(match.group(1))
-    suffix = match.group(2).upper()
-
-    if suffix == "K":
-        number *= 1000
-    elif suffix == "M":
-        number *= 1000000
-
-    return int(number)
-
-
-# ---------------------------------------------------------
-# SEARCH ANY JSON OBJECT RECURSIVELY
-# ---------------------------------------------------------
-
-def search_json_for_trending(obj, results=None, path=""):
-    if results is None:
-        results = []
-
-    try:
-        if isinstance(obj, dict):
-
-            for key, value in obj.items():
-
-                key_lower = str(key).lower()
-
-                interesting_key = any(word in key_lower for word in [
-                    "trending",
-                    "velocity",
-                    "recentbooking",
-                    "bookingvelocity",
-                    "ticketcount",
-                    "bookingcount",
-                    "recentbook",
-                    "bought",
-                    "booked",
-                    "ticket"
-                ])
-
-                if interesting_key:
-                    results.append({
-                        "path": f"{path}.{key}",
-                        "key": key,
-                        "value": value
-                    })
-
-                search_json_for_trending(
-                    value,
-                    results,
-                    f"{path}.{key}"
-                )
-
-        elif isinstance(obj, list):
-
-            for index, value in enumerate(obj):
-                search_json_for_trending(
-                    value,
-                    results,
-                    f"{path}[{index}]"
-                )
-
-    except Exception:
-        pass
-
-    return results
-
-
-# ---------------------------------------------------------
-# EXTRACT TICKET NUMBER FROM TEXT
-# ---------------------------------------------------------
-
-def extract_ticket_number(text):
-    if not text:
-        return 0, ""
-
-    text = str(text)
-
-    patterns = [
-
-        # 1.2K tickets bought
-        r"(\d+(?:\.\d+)?\s*[KMkm]?)\s*tickets?\s*(?:bought|booked)",
-
-        # 1.2K tickets bought in the last hour
-        r"(\d+(?:\.\d+)?\s*[KMkm]?)\s*tickets?.{0,80}?(?:bought|booked)",
-
-        # tickets bought: 1.2K
-        r"tickets?\s*(?:bought|booked)\s*[:\-]?\s*(\d+(?:\.\d+)?\s*[KMkm]?)",
-
-        # 1.2K booked
-        r"(\d+(?:\.\d+)?\s*[KMkm]?)\s*(?:bought|booked)",
-
-        # 1.2K tickets
-        r"(\d+(?:\.\d+)?\s*[KMkm]?)\s*tickets?",
-
-        # "count": 123
-        r'"(?:count|ticketCount|bookingCount|recentBookings)"\s*:\s*(\d+)',
-
-        # "value": "1.2K"
-        r'"(?:value|label|text)"\s*:\s*"([^"]*(?:ticket|booked|bought)[^"]*)"',
-    ]
-
-    for pattern in patterns:
-
-        try:
-            match = re.search(
-                pattern,
-                text,
-                re.IGNORECASE | re.DOTALL
-            )
-
-            if match:
-
-                candidate = match.group(1)
-
-                number = parse_tickets(candidate)
-
-                if number > 0:
-                    return number, match.group(0)[:500]
-
-        except Exception:
-            continue
-
-    return 0, ""
-
-
-# ---------------------------------------------------------
-# CHECK JSON FOR TRENDING NUMBER
-# ---------------------------------------------------------
-
-def extract_from_json(text, movie_code=None, movie_title=None):
-
-    if not text:
-        return 0, ""
-
-    # First try direct text extraction
-    tickets, raw = extract_ticket_number(text)
-
-    if tickets > 0:
-        return tickets, raw
-
-    # Try parsing JSON
-    try:
-        data = json.loads(text)
-    except Exception:
-        return 0, ""
-
-    # Search interesting fields
-    matches = search_json_for_trending(data)
-
-    for item in matches:
-
-        value = item.get("value")
-
-        if value is None:
-            continue
-
-        # Convert object/list/value to text
-        try:
-            value_text = json.dumps(
-                value,
-                ensure_ascii=False
-            )
-        except Exception:
-            value_text = str(value)
-
-        tickets, raw = extract_ticket_number(value_text)
-
-        if tickets > 0:
-            return tickets, raw
-
-        # Sometimes value itself is just a number
-        key = str(item.get("key", "")).lower()
-
-        if any(x in key for x in [
-            "ticketcount",
-            "bookingcount",
-            "recentbooking"
-        ]):
-
-            try:
-                number = parse_tickets(value)
-
-                if number > 0:
-                    return number, f"{item['key']}: {value}"
-
-            except Exception:
-                pass
-
-    return 0, ""
-
-
-# ---------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------
 
 def run():
 
-    print("==========================================")
-    print("BOOKMYSHOW TRENDING TRACKER")
-    print("==========================================")
+    # --------------------------------------------------
+    # RESET DEBUG FILE
+    # --------------------------------------------------
 
-    # -----------------------------------------------------
+    with open(
+        DEBUG_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        f.write(
+            "BOOKMYSHOW TRENDING DIAGNOSTIC\n"
+        )
+
+        f.write(
+            "Started: "
+            + datetime.datetime.now().isoformat()
+            + "\n\n"
+        )
+
+    write_debug(
+        "=============================================="
+    )
+
+    write_debug(
+        "BOOKMYSHOW TRENDING DIAGNOSTIC"
+    )
+
+    write_debug(
+        "=============================================="
+    )
+
+    # --------------------------------------------------
     # GOOGLE SHEETS
-    # -----------------------------------------------------
+    # --------------------------------------------------
 
-    print("\n1. Connecting to Google Sheets...")
+    write_debug(
+        "\nConnecting to Google Sheets..."
+    )
 
     sa_info = json.loads(
         os.environ["GCP_SA_KEY"]
@@ -257,79 +84,39 @@ def run():
 
     sheet = spreadsheet.get_worksheet(0)
 
-    header = sheet.row_values(1)
-
-    expected_header = [
-        "Timestamp (IST)",
-        "Movie Title",
-        "Event Code",
-        "Tickets Sold (Last 1 Hr)",
-        "Raw Status Text",
-        "Scope"
-    ]
-
-    if not header or header[0] != "Timestamp (IST)":
-
-        sheet.insert_row(
-            expected_header,
-            1
-        )
-
-    # -----------------------------------------------------
-    # TIME
-    # -----------------------------------------------------
-
-    now_utc = datetime.datetime.now(
-        datetime.timezone.utc
-    )
-
-    now_ist = (
-        now_utc +
-        datetime.timedelta(
-            hours=5,
-            minutes=30
-        )
-    ).strftime("%Y-%m-%d %H:00:00")
-
-    # -----------------------------------------------------
-    # MOVIES
-    # -----------------------------------------------------
-
-    unique_movies = {}
-
-    rows_to_append = []
-
-    # All network responses captured
-    network_responses = []
-
-    # -----------------------------------------------------
+    # --------------------------------------------------
     # PLAYWRIGHT
-    # -----------------------------------------------------
+    # --------------------------------------------------
 
-    print("\n2. Starting browser session...")
+    write_debug(
+        "\nStarting Chromium..."
+    )
 
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
             headless=True,
             args=[
-                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
-                "--disable-setuid-sandbox"
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled"
             ]
         )
 
         context = browser.new_context(
 
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/124.0.0.0 "
+                "Safari/537.36"
             ),
 
             viewport={
-                "width": 1366,
-                "height": 768
+                "width": 1440,
+                "height": 900
             },
 
             locale="en-IN",
@@ -339,88 +126,205 @@ def run():
 
         page = context.new_page()
 
-        # -------------------------------------------------
-        # NETWORK RESPONSE CAPTURE
-        # -------------------------------------------------
+        # --------------------------------------------------
+        # REQUEST LOGGER
+        # --------------------------------------------------
+
+        def on_request(request):
+
+            try:
+
+                url = request.url
+
+                resource_type = request.resource_type
+
+                # We are particularly interested in these
+                if resource_type in [
+                    "xhr",
+                    "fetch"
+                ]:
+
+                    write_debug(
+                        "\n[REQUEST]"
+                    )
+
+                    write_debug(
+                        "TYPE: "
+                        + resource_type
+                    )
+
+                    write_debug(
+                        "URL: "
+                        + url
+                    )
+
+                    # POST body can reveal GraphQL/API query
+                    try:
+
+                        post_data = request.post_data
+
+                        if post_data:
+
+                            write_debug(
+                                "POST DATA:"
+                            )
+
+                            write_debug(
+                                post_data[:10000]
+                            )
+
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+        page.on(
+            "request",
+            on_request
+        )
+
+        # --------------------------------------------------
+        # RESPONSE LOGGER
+        # --------------------------------------------------
 
         def on_response(response):
 
             try:
 
-                url = response.url.lower()
+                url = response.url
+
+                resource_type = response.request.resource_type
 
                 content_type = (
                     response.headers
-                    .get("content-type", "")
+                    .get(
+                        "content-type",
+                        ""
+                    )
                     .lower()
                 )
 
-                interesting_url = any(
-                    x in url
-                    for x in [
-                        "api",
-                        "graphql",
-                        "booking",
-                        "ticket",
-                        "trending",
-                        "event",
-                        "movie"
+                # Only API/XHR/fetch/json
+                interesting = (
+                    resource_type in [
+                        "xhr",
+                        "fetch"
                     ]
-                )
-
-                interesting_type = (
+                    or
                     "json" in content_type
-                    or "graphql" in url
+                    or
+                    "graphql" in url.lower()
                 )
 
-                if not (
-                    interesting_url
-                    or interesting_type
-                ):
+                if not interesting:
                     return
 
                 try:
-                    text = response.text()
+
+                    body = response.text()
+
                 except Exception:
+
                     return
 
-                if not text:
+                if not body:
                     return
 
-                # Only retain responses that could realistically
-                # contain the Trending information.
-                lower_text = text.lower()
+                lower = body.lower()
 
-                if any(
-                    x in lower_text
-                    for x in [
-                        "trending",
-                        "bookingvelocity",
-                        "recentbookings",
-                        "ticketcount",
-                        "bookingcount",
-                        "tickets bought",
-                        "tickets booked",
-                        "velocity"
-                    ]
-                ):
+                # ------------------------------------------------
+                # VERY BROAD KEYWORD CHECK
+                # ------------------------------------------------
 
-                    network_responses.append({
-                        "url": response.url,
-                        "text": text
-                    })
+                keywords = [
+                    "trending",
+                    "trend",
+                    "bookingvelocity",
+                    "booking_velocity",
+                    "recentbooking",
+                    "recent_booking",
+                    "ticketcount",
+                    "ticket_count",
+                    "bookingcount",
+                    "booking_count",
+                    "ticketsbought",
+                    "tickets_bought",
+                    "ticketsbooked",
+                    "tickets_booked",
+                    "bought",
+                    "booked",
+                    "velocity",
+                    "ticket",
+                    "booking"
+                ]
 
-                    print(
-                        "\n[NETWORK] Possible Trending response:"
-                    )
+                matched = [
+                    word
+                    for word in keywords
+                    if word in lower
+                ]
 
-                    print(
-                        response.url
-                    )
+                if not matched:
+                    return
 
-                    print(
-                        text[:1000]
-                    )
+                write_debug(
+                    "\n"
+                    + "=" * 80
+                )
+
+                write_debug(
+                    "[IMPORTANT RESPONSE]"
+                )
+
+                write_debug(
+                    "STATUS: "
+                    + str(response.status)
+                )
+
+                write_debug(
+                    "TYPE: "
+                    + resource_type
+                )
+
+                write_debug(
+                    "CONTENT TYPE: "
+                    + content_type
+                )
+
+                write_debug(
+                    "MATCHED KEYWORDS: "
+                    + ", ".join(matched)
+                )
+
+                write_debug(
+                    "URL:"
+                )
+
+                write_debug(
+                    url
+                )
+
+                # ------------------------------------------------
+                # RESPONSE BODY
+                # ------------------------------------------------
+
+                write_debug(
+                    "\nRESPONSE BODY:"
+                )
+
+                # Don't truncate too aggressively.
+                # First 50,000 characters should be enough
+                # to identify the API structure.
+
+                write_debug(
+                    body[:50000]
+                )
+
+                write_debug(
+                    "\n"
+                    + "=" * 80
+                )
 
             except Exception:
                 pass
@@ -430,12 +334,12 @@ def run():
             on_response
         )
 
-        # -------------------------------------------------
+        # --------------------------------------------------
         # DISCOVER MOVIES
-        # -------------------------------------------------
+        # --------------------------------------------------
 
-        print(
-            "\n3. Discovering active movies..."
+        write_debug(
+            "\nOpening BookMyShow Mumbai movies..."
         )
 
         try:
@@ -443,35 +347,59 @@ def run():
             page.goto(
                 "https://in.bookmyshow.com/explore/movies-mumbai",
                 wait_until="domcontentloaded",
-                timeout=30000
+                timeout=60000
             )
 
             page.wait_for_timeout(
-                5000
+                8000
             )
 
-            # Scroll several times because BMS is dynamic
-            for _ in range(4):
+            # Scroll to trigger lazy loading
+            for i in range(8):
+
+                write_debug(
+                    f"Scrolling {i + 1}/8..."
+                )
 
                 page.evaluate(
-                    "window.scrollBy(0, 1500)"
+                    "window.scrollBy(0, 1200)"
                 )
 
                 page.wait_for_timeout(
-                    1000
+                    1500
                 )
+
+        except Exception as e:
+
+            write_debug(
+                "Movie discovery error: "
+                + str(e)
+            )
+
+        # --------------------------------------------------
+        # FIND MOVIE LINKS
+        # --------------------------------------------------
+
+        movies = {}
+
+        try:
 
             links = page.eval_on_selector_all(
                 "a",
                 """
                 elements =>
                     elements
-                    .map(el => el.getAttribute('href'))
-                    .filter(Boolean)
+                    .map(el => ({
+                        href: el.getAttribute('href'),
+                        text: el.innerText
+                    }))
+                    .filter(x => x.href)
                 """
             )
 
-            for href in links:
+            for item in links:
+
+                href = item["href"]
 
                 match = re.search(
                     r"/movies/[^/]+/([a-z0-9-]+)/(ET\d{6,10})",
@@ -486,415 +414,271 @@ def run():
 
                 code = match.group(2)
 
-                if code not in unique_movies:
+                title = (
+                    slug
+                    .replace("-", " ")
+                    .title()
+                )
 
-                    unique_movies[code] = {
+                if code not in movies:
 
-                        "title": (
-                            slug
-                            .replace("-", " ")
-                            .title()
-                        ),
-
+                    movies[code] = {
+                        "title": title,
                         "url": (
                             href
                             if href.startswith("http")
                             else
-                            f"https://in.bookmyshow.com{href}"
-                        ),
-
-                        "code": code
+                            "https://in.bookmyshow.com"
+                            + href
+                        )
                     }
 
         except Exception as e:
 
-            print(
-                f"Explore error: {e}"
+            write_debug(
+                "Movie extraction error: "
+                + str(e)
             )
 
-        print(
-            f"\nFound {len(unique_movies)} active movies."
+        write_debug(
+            "\nMovies found: "
+            + str(len(movies))
         )
 
-        # -------------------------------------------------
-        # MOVIE-BY-MOVIE EXTRACTION
-        # -------------------------------------------------
+        # --------------------------------------------------
+        # PICK FIRST FEW MOVIES
+        # --------------------------------------------------
+        #
+        # We don't need to inspect 100 movies.
+        # 5 is enough to identify the API.
+        # --------------------------------------------------
 
-        for index, (code, meta) in enumerate(
-            unique_movies.items(),
+        selected = list(
+            movies.items()
+        )[:5]
+
+        write_debug(
+            "\nInspecting "
+            + str(len(selected))
+            + " movie pages..."
+        )
+
+        # --------------------------------------------------
+        # VISIT MOVIE PAGES
+        # --------------------------------------------------
+
+        for number, (code, movie) in enumerate(
+            selected,
             start=1
         ):
 
-            print("\n------------------------------------------")
-            print(
-                f"{index}/{len(unique_movies)} "
-                f"{meta['title']} "
-                f"({code})"
+            write_debug(
+                "\n\n"
+                + "#" * 80
             )
-            print("------------------------------------------")
 
-            tickets = 0
+            write_debug(
+                f"MOVIE {number}/{len(selected)}"
+            )
 
-            raw_text = "No Trending Badge Found"
+            write_debug(
+                "TITLE: "
+                + movie["title"]
+            )
 
-            # Clear old network responses
-            network_responses.clear()
+            write_debug(
+                "EVENT CODE: "
+                + code
+            )
+
+            write_debug(
+                "URL: "
+                + movie["url"]
+            )
+
+            write_debug(
+                "#" * 80
+            )
 
             try:
 
-                # -----------------------------------------
-                # OPEN MOVIE PAGE
-                # -----------------------------------------
-
                 page.goto(
-                    meta["url"],
+                    movie["url"],
                     wait_until="domcontentloaded",
-                    timeout=30000
+                    timeout=60000
                 )
 
-                # Give BMS JavaScript time to load
+                # Important:
+                # wait for dynamic BMS components
                 page.wait_for_timeout(
-                    6000
+                    10000
                 )
 
-                # Scroll page
-                for _ in range(3):
+                # Scroll entire page
+                for i in range(6):
 
                     page.evaluate(
-                        "window.scrollBy(0, 1200)"
+                        "window.scrollBy(0, 1000)"
                     )
 
                     page.wait_for_timeout(
-                        1000
+                        1500
                     )
 
-                # -----------------------------------------
-                # METHOD 1
-                # NETWORK RESPONSES
-                # -----------------------------------------
-
-                print(
-                    "Checking network/API data..."
+                # Additional wait
+                page.wait_for_timeout(
+                    5000
                 )
 
-                for response_data in network_responses:
+                # ------------------------------------------------
+                # SAVE FULL PAGE TEXT
+                # ------------------------------------------------
 
-                    response_url = response_data["url"]
-
-                    response_text = response_data["text"]
-
-                    # Check whether this response is
-                    # related to current movie
-                    related = (
-                        code.lower()
-                        in response_text.lower()
-                        or
-                        code.lower()
-                        in response_url.lower()
-                        or
-                        meta["title"].lower()
-                        in response_text.lower()
-                    )
-
-                    if not related:
-                        continue
-
-                    found, raw = extract_from_json(
-                        response_text,
-                        code,
-                        meta["title"]
-                    )
-
-                    if found > 0:
-
-                        tickets = found
-
-                        raw_text = raw
-
-                        print(
-                            f"FOUND FROM NETWORK: "
-                            f"{tickets}"
-                        )
-
-                        print(
-                            f"RAW: {raw_text}"
-                        )
-
-                        break
-
-                # -----------------------------------------
-                # METHOD 2
-                # VISIBLE DOM
-                # -----------------------------------------
-
-                if tickets == 0:
-
-                    print(
-                        "Checking visible page text..."
-                    )
+                try:
 
                     body_text = page.locator(
                         "body"
-                    ).inner_text(
-                        timeout=10000
+                    ).inner_text()
+
+                    write_debug(
+                        "\nVISIBLE PAGE TEXT:"
                     )
 
-                    found, raw = extract_ticket_number(
-                        body_text
+                    write_debug(
+                        body_text[:30000]
                     )
 
-                    if found > 0:
+                except Exception:
+                    pass
 
-                        tickets = found
+                # ------------------------------------------------
+                # SAVE HTML
+                # ------------------------------------------------
 
-                        raw_text = raw
+                try:
 
-                        print(
-                            f"FOUND FROM DOM: "
-                            f"{tickets}"
-                        )
+                    html = page.content()
 
-                # -----------------------------------------
-                # METHOD 3
-                # SEARCH ALL ELEMENTS
-                # -----------------------------------------
+                    # Search HTML for relevant terms
+                    html_lower = html.lower()
 
-                if tickets == 0:
+                    html_keywords = [
+                        "trending",
+                        "booking",
+                        "ticket",
+                        "bought",
+                        "booked",
+                        "velocity"
+                    ]
 
-                    print(
-                        "Checking individual elements..."
+                    matched_html = [
+                        x
+                        for x in html_keywords
+                        if x in html_lower
+                    ]
+
+                    write_debug(
+                        "\nHTML KEYWORDS FOUND:"
                     )
 
-                    elements = page.locator(
-                        "span, div, p, section"
+                    write_debug(
+                        ", ".join(matched_html)
                     )
 
-                    count = min(
-                        elements.count(),
-                        5000
-                    )
+                    # Save snippets around keywords
+                    for keyword in matched_html:
 
-                    for i in range(count):
+                        positions = [
+                            m.start()
+                            for m in re.finditer(
+                                keyword,
+                                html_lower
+                            )
+                        ]
 
-                        try:
+                        for pos in positions[:10]:
 
-                            text = elements.nth(
-                                i
-                            ).inner_text(
-                                timeout=1000
+                            start = max(
+                                0,
+                                pos - 1000
                             )
 
-                        except Exception:
-
-                            continue
-
-                        if not text:
-                            continue
-
-                        lower = text.lower()
-
-                        if any(
-                            x in lower
-                            for x in [
-                                "bought",
-                                "booked",
-                                "trending",
-                                "ticket"
-                            ]
-                        ):
-
-                            found, raw = (
-                                extract_ticket_number(
-                                    text
-                                )
+                            end = min(
+                                len(html),
+                                pos + 3000
                             )
 
-                            if found > 0:
-
-                                tickets = found
-
-                                raw_text = text[:500]
-
-                                print(
-                                    f"FOUND FROM ELEMENT: "
-                                    f"{tickets}"
-                                )
-
-                                print(
-                                    f"TEXT: "
-                                    f"{raw_text}"
-                                )
-
-                                break
-
-                # -----------------------------------------
-                # METHOD 4
-                # PAGE HTML
-                # -----------------------------------------
-
-                if tickets == 0:
-
-                    print(
-                        "Checking page HTML..."
-                    )
-
-                    content = page.content()
-
-                    found, raw = (
-                        extract_ticket_number(
-                            content
-                        )
-                    )
-
-                    if found > 0:
-
-                        tickets = found
-
-                        raw_text = raw
-
-                        print(
-                            f"FOUND FROM HTML: "
-                            f"{tickets}"
-                        )
-
-                # -----------------------------------------
-                # METHOD 5
-                # NEXT.JS / EMBEDDED JSON
-                # -----------------------------------------
-
-                if tickets == 0:
-
-                    print(
-                        "Checking embedded JSON..."
-                    )
-
-                    scripts = page.locator(
-                        "script"
-                    )
-
-                    script_count = scripts.count()
-
-                    for i in range(
-                        min(script_count, 500)
-                    ):
-
-                        try:
-
-                            script_text = (
-                                scripts
-                                .nth(i)
-                                .inner_text(
-                                    timeout=1000
-                                )
+                            write_debug(
+                                f"\nHTML SNIPPET "
+                                f"FOR [{keyword}]:"
                             )
 
-                        except Exception:
-
-                            continue
-
-                        if not script_text:
-                            continue
-
-                        lower = script_text.lower()
-
-                        if not any(
-                            x in lower
-                            for x in [
-                                "trending",
-                                "ticket",
-                                "booking",
-                                "velocity"
-                            ]
-                        ):
-                            continue
-
-                        found, raw = (
-                            extract_from_json(
-                                script_text,
-                                code,
-                                meta["title"]
-                            )
-                        )
-
-                        if found > 0:
-
-                            tickets = found
-
-                            raw_text = raw
-
-                            print(
-                                f"FOUND FROM EMBEDDED JSON: "
-                                f"{tickets}"
+                            write_debug(
+                                html[start:end]
                             )
 
-                            break
+                except Exception:
+                    pass
+
+                # ------------------------------------------------
+                # SCREENSHOT
+                # ------------------------------------------------
+
+                try:
+
+                    filename = (
+                        "bms_debug_"
+                        + code
+                        + ".png"
+                    )
+
+                    page.screenshot(
+                        path=filename,
+                        full_page=True
+                    )
+
+                    write_debug(
+                        "\nScreenshot saved: "
+                        + filename
+                    )
+
+                except Exception as e:
+
+                    write_debug(
+                        "Screenshot error: "
+                        + str(e)
+                    )
 
             except Exception as e:
 
-                print(
-                    f"Error checking "
-                    f"{meta['title']}: {e}"
+                write_debug(
+                    "Movie page error: "
+                    + str(e)
                 )
 
-            # ---------------------------------------------
-            # FINAL RESULT
-            # ---------------------------------------------
-
-            if tickets == 0:
-
-                print(
-                    "TRENDING: NOT FOUND"
-                )
-
-            else:
-
-                print(
-                    f"TRENDING: {tickets} tickets"
-                )
-
-            rows_to_append.append(
-                [
-                    now_ist,
-                    meta["title"],
-                    code,
-                    tickets,
-                    raw_text,
-                    "All India"
-                ]
-            )
+        # --------------------------------------------------
+        # FINISH
+        # --------------------------------------------------
 
         browser.close()
 
-    # -----------------------------------------------------
-    # GOOGLE SHEETS
-    # -----------------------------------------------------
+    write_debug(
+        "\n\n"
+        + "=" * 80
+    )
 
-    if rows_to_append:
+    write_debug(
+        "DIAGNOSTIC COMPLETE"
+    )
 
-        print(
-            f"\n4. Pushing "
-            f"{len(rows_to_append)} rows "
-            f"to Google Sheets..."
-        )
+    write_debug(
+        "Check bms_debug.txt"
+    )
 
-        sheet.append_rows(
-            rows_to_append,
-            value_input_option="USER_ENTERED"
-        )
+    write_debug(
+        "=" * 80
+    )
 
-        print(
-            "\nDONE!"
-        )
-
-        print(
-            "Data successfully written "
-            "to Google Sheets."
-        )
-
-
-# ---------------------------------------------------------
-# RUN
-# ---------------------------------------------------------
 
 if __name__ == "__main__":
     run()
