@@ -65,22 +65,21 @@ def run():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 768}
         )
+        
+        # Block unnecessary heavy media/analytics to speed up loading
         page = context.new_page()
+        page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2,css}", lambda route: route.abort())
 
         # Step A: Discover active movies on the explore page
-        print("Discovering active movies on BookMyShow...")
+        print("Navigating to BookMyShow explore page...")
         try:
-            page.goto("https://in.bookmyshow.com/explore/movies-mumbai", wait_until="networkidle", timeout=45000)
-            page.wait_for_timeout(3000)
+            page.goto("https://in.bookmyshow.com/explore/movies-mumbai", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(4000)
 
-            # Scroll down to load all dynamic cards
-            page.evaluate("window.scrollBy(0, 1500)")
-            page.wait_for_timeout(2000)
-
-            # Find all links containing movie slugs and event codes (ET00XXXXXX)
+            # Extract all anchor tags matching movie patterns
             links = page.eval_on_selector_all(
-                "a[href*='/movies/']",
-                "elements => elements.map(el => el.href)"
+                "a",
+                "elements => elements.map(el => el.getAttribute('href')).filter(Boolean)"
             )
 
             for href in links:
@@ -89,10 +88,11 @@ def run():
                     slug = match.group(1)
                     code = match.group(2)
                     if code not in unique_movies:
-                        title = slug.replace("-", " ").title()
+                        clean_title = slug.replace("-", " ").title()
+                        full_url = href if href.startswith("http") else f"https://in.bookmyshow.com{href}"
                         unique_movies[code] = {
-                            "title": title,
-                            "url": href,
+                            "title": clean_title,
+                            "url": full_url,
                             "code": code
                         }
         except Exception as e:
@@ -106,7 +106,7 @@ def run():
             raw_text = "No Trending Badge"
 
             try:
-                page.goto(meta["url"], wait_until="domcontentloaded", timeout=20000)
+                page.goto(meta["url"], wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_timeout(2000)
                 body_text = page.inner_text("body")
 
