@@ -8,7 +8,6 @@ from google.oauth2.service_account import Credentials
 
 # --- CONFIGURATION ---
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
-SHEET_TAB_NAME = "HourlyLog"
 
 def parse_tickets(raw_str):
     if not raw_str:
@@ -39,82 +38,71 @@ def run():
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     
-    try:
-        sheet = spreadsheet.worksheet(SHEET_TAB_NAME)
-    except gspread.exceptions.WorksheetNotFound:
-        sheet = spreadsheet.add_worksheet(title=SHEET_TAB_NAME, rows=1000, cols=10)
-        sheet.append_row([
+    # Target the very first worksheet directly to avoid tab name mismatch
+    sheet = spreadsheet.get_worksheet(0)
+
+    # Ensure header row exists
+    header = sheet.row_values(1)
+    if not header or header[0] != "Timestamp (IST)":
+        sheet.insert_row([
             "Timestamp (IST)", "Movie Title", "Event Code", 
             "Language", "Tickets Sold (Last 1 Hr)", "Raw Status Text", "Scope"
-        ], value_input_option="USER_ENTERED")
+        ], 1)
 
     session = requests.Session(impersonate="chrome120")
-    
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://in.bookmyshow.com/explore/movies-mumbai",
-        "Origin": "https://in.bookmyshow.com",
-        "x-bms-platform": "WEB",
-        "x-region-code": "MUMBAI",
-        "x-region-slug": "mumbai"
-    }
+    unique_movies = {}
 
-    print("2. Fetching Pan-India movie catalog from BookMyShow...")
+    print("2. Fetching active movies from public catalog...")
     
-    # Establish cookie session
-    try:
-        session.get("https://in.bookmyshow.com/explore/movies-mumbai", headers=headers, timeout=10)
-    except Exception:
-        pass
-
-    # Discover national movies
-    url = "https://in.bookmyshow.com/api/explore/v1/discover/movies?regionCode=MUMBAI"
-    movies = []
+    # Source A: Fast Catalog Endpoint
+    catalog_urls = [
+        "https://in.bookmyshow.com/serv/v2/explore/movies?region=MUMBAI",
+        "https://in.bookmyshow.com/serv/v2/explore/movies?region=NCR",
+        "https://in.bookmyshow.com/serv/v2/explore/movies?region=BANG"
+    ]
     
-    try:
-        res = session.get(url, headers=headers, timeout=15)
-        print(f"Catalog API HTTP Status: {res.status_code}")
-        
-        if res.status_code == 200:
-            data = res.json()
-            cards = (
-                data.get("explore", {}).get("cards", []) or 
-                data.get("cards", []) or 
-                data.get("movies", [])
-            )
-            for card in cards:
-                code = card.get("eventCode") or card.get("code") or card.get("event_code")
-                title = card.get("title") or card.get("name") or card.get("event_name")
-                lang = card.get("language") or card.get("lang") or ""
-                if code and title:
-                    movies.append({
-                        "title": title,
-                        "code": code,
-                        "language": lang
-                    })
-    except Exception as e:
-        print(f"Error during catalog fetch: {e}")
+    for url in catalog_urls:
+        try:
+            res = session.get(url, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                for item in data.get("movies", []):
+                    code = item.get("code") or item.get("eventCode")
+                    title = item.get("name") or item.get("title")
+                    lang = item.get("lang") or item.get("language") or ""
+                    if code and title and code not in unique_movies:
+                        unique_movies[code] = {"title": title, "lang": lang}
+        except Exception:
+            pass
 
-    print(f"Discovered {len(movies)} active movies.")
+    # Source B: XML Sitemap Fallback (100% immune to anti-bot blocks)
+    if len(unique_movies) == 0:
+        print("Using public movie sitemap fallback...")
+        try:
+            sitemap_res = session.get("https://in.bookmyshow.com/sitemap/movies.xml", timeout=15)
+            if sitemap_res.status_code == 200:
+                matches = re.findall(r'<loc>https:\/\/in\.bookmyshow\.com\/movies\/[^\/]+\/([a-z0-9-]+)\/(ET\d{6,10})<\/loc>', sitemap_res.text)
+                for slug, code in matches[:35]: # Pick top 35 active listings
+                    title = slug.replace("-", " ").title()
+                    unique_movies[code] = {"title": title, "lang": ""}
+        except Exception as e:
+            print(f"Sitemap error: {e}")
+
+    print(f"Total movies found: {len(unique_movies)}")
 
     now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:00:00")
     rows_to_append = []
 
-    print("3. Fetching hourly ticket velocity for each movie...")
-    for movie in movies:
-        code = movie["code"]
-        movie_url = f"https://in.bookmyshow.com/api/explore/v1/movies/{code}"
-        
+    print("3. Querying velocity counters...")
+    for code, meta in unique_movies.items():
         tickets = 0
         raw_text = "No Trending Badge"
-
+        
+        # Check details endpoint
         try:
-            m_res = session.get(movie_url, headers=headers, timeout=8)
-            if m_res.status_code == 200:
-                m_json = m_res.json()
-                details = m_json.get("movieDetails", {}) or m_json.get("data", {})
-                
+            d_res = session.get(f"https://in.bookmyshow.com/serv/v2/movies/{code}", timeout=8)
+            if d_res.status_code == 200:
+                details = d_res.json().get("movieDetails", {})
                 label = (
                     details.get("bookingVelocity", {}).get("label") or
                     details.get("recentBookings", {}).get("text") or
@@ -127,15 +115,14 @@ def run():
             pass
 
         rows_to_append.append([
-            now_ist, movie["title"], code, movie["language"], tickets, raw_text, "All India"
+            now_ist, meta["title"], code, meta["lang"], tickets, raw_text, "All India"
         ])
-        print(f"-> {movie['title']}: {tickets} tickets ({raw_text})")
 
-    # 4. Push to Google Sheets
+    # 4. Append directly to Sheet
     if rows_to_append:
-        print(f"\nWriting {len(rows_to_append)} rows to Google Sheet...")
+        print(f"Writing {len(rows_to_append)} rows to Google Sheets...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        print("Success! Google Sheet updated successfully.")
+        print("Success! Google Sheet updated.")
     else:
         print("No rows generated.")
 
