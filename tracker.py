@@ -38,7 +38,6 @@ def run():
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     sheet = spreadsheet.get_worksheet(0)
 
-    # Ensure headers exist
     header = sheet.row_values(1)
     if not header or header[0] != "Timestamp (IST)":
         sheet.insert_row([
@@ -48,18 +47,14 @@ def run():
 
     now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:00:00")
     unique_movies = {}
-    velocity_data = {}  # event_code -> (tickets_count, raw_text)
+    network_velocity = {}
     rows_to_append = []
 
-    print("2. Launching browser with network interception...")
+    print("2. Starting browser session...")
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox"
-            ]
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-setuid-sandbox"]
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -67,108 +62,97 @@ def run():
         )
         page = context.new_page()
 
-        # Intercept background API JSON payloads directly
-        def handle_response(response):
-            url = response.url
-            if ("explore" in url or "movie" in url or "velocity" in url or "analytics" in url) and "json" in response.headers.get("content-type", ""):
-                try:
-                    payload = response.json()
-                    # Check for movieDetails / velocity objects
-                    if isinstance(payload, dict):
-                        # Pattern A: Direct movieDetails
-                        details = payload.get("movieDetails") or payload.get("data") or payload
-                        if isinstance(details, dict):
-                            code = details.get("eventCode") or details.get("code") or details.get("EventCode")
-                            label = (
-                                details.get("bookingVelocity", {}).get("label")
-                                or details.get("recentBookings", {}).get("text")
-                                or details.get("trendingCount")
-                                or ""
-                            )
-                            if code and label:
-                                velocity_data[code] = (parse_tickets(label), str(label))
-                except Exception:
-                    pass
+        # METHOD 1: Universal Network Interceptor
+        def on_response(response):
+            try:
+                if "json" in response.headers.get("content-type", ""):
+                    text = response.text()
+                    # Search for any bookingVelocity or ticket count keys in all JSON responses
+                    matches = re.findall(r'\"(?:bookingVelocity|recentBookings|trendingCount|ticketCountLabel)\"\s*:\s*\{?[^\}]*\"?(?:label|text|count)?\"?\s*:?\s*\"?([^\",\}]+)', text, re.IGNORECASE)
+                    for m in matches:
+                        if any(k in m.lower() for k in ["bought", "booked", "ticket", "k"]):
+                            for code in unique_movies:
+                                if code in response.url or code in text:
+                                    network_velocity[code] = m
+            except Exception:
+                pass
 
-        page.on("response", handle_response)
+        page.on("response", on_response)
 
-        # Step A: Discover active movies on explore page
-        print("Navigating to explore catalog...")
+        # Discover Movies
+        print("Discovering active movies...")
         try:
             page.goto("https://in.bookmyshow.com/explore/movies-mumbai", wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
-
-            # Scroll down to trigger all dynamic cards
             page.evaluate("window.scrollBy(0, 2000)")
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
 
-            links = page.eval_on_selector_all(
-                "a",
-                "elements => elements.map(el => el.getAttribute('href')).filter(Boolean)"
-            )
-
+            links = page.eval_on_selector_all("a", "elements => elements.map(el => el.getAttribute('href')).filter(Boolean)")
             for href in links:
                 match = re.search(r'/movies/[^/]+/([a-z0-9-]+)/(ET\d{6,10})', href, re.IGNORECASE)
                 if match:
                     slug = match.group(1)
                     code = match.group(2)
                     if code not in unique_movies:
-                        clean_title = slug.replace("-", " ").title()
-                        full_url = href if href.startswith("http") else f"https://in.bookmyshow.com{href}"
                         unique_movies[code] = {
-                            "title": clean_title,
-                            "url": full_url,
+                            "title": slug.replace("-", " ").title(),
+                            "url": href if href.startswith("http") else f"https://in.bookmyshow.com{href}",
                             "code": code
                         }
         except Exception as e:
-            print(f"Error exploring catalog: {e}")
+            print(f"Explore error: {e}")
 
-        print(f"Discovered {len(unique_movies)} active movies.")
+        print(f"Found {len(unique_movies)} active movies. Extracting data via all strategies...")
 
-        # Step B: Visit each movie page to allow the velocity widget to load
         for code, meta in unique_movies.items():
             tickets = 0
-            raw_text = "No Velocity Badge"
+            raw_text = "No Trending Badge"
 
-            # Check if intercepted by network listener
-            if code in velocity_data:
-                tickets, raw_text = velocity_data[code]
-            else:
-                try:
-                    page.goto(meta["url"], wait_until="domcontentloaded", timeout=15000)
-                    page.wait_for_timeout(2500) # Give 2.5s for dynamic widgets to render
+            try:
+                page.goto(meta["url"], wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_timeout(2000)
 
-                    if code in velocity_data:
-                        tickets, raw_text = velocity_data[code]
-                    else:
-                        # Scan rendered DOM elements for velocity text
-                        text_content = page.content()
-                        # Search for trending patterns (e.g., "12.5K tickets bought in last 1 hour" or "850 bought in last 24 hours")
-                        v_match = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)\s*(?:in\s+last|in\s+the\s+last)?\s*(\d+\s*(?:hour|hr|hours|hrs))', text_content, re.IGNORECASE)
-                        if not v_match:
-                            v_match = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)', text_content, re.IGNORECASE)
+                # METHOD 2: Check Network Intercepted Data
+                if code in network_velocity:
+                    raw_text = network_velocity[code]
+                    tickets = parse_tickets(raw_text)
 
-                        if v_match:
-                            raw_text = v_match.group(0)
-                            tickets = parse_tickets(v_match.group(1))
+                # METHOD 3: DOM Selector & Badge Search
+                if tickets == 0:
+                    badges = page.eval_on_selector_all(
+                        "span, div, p", 
+                        "elements => elements.map(e => e.innerText).filter(t => t && (t.includes('bought') || t.includes('booked')))"
+                    )
+                    for b in badges:
+                        m = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)', b, re.IGNORECASE)
+                        if m:
+                            raw_text = b.strip()
+                            tickets = parse_tickets(m.group(1))
+                            break
 
-                except Exception as e:
-                    print(f"Error visiting {meta['title']}: {e}")
+                # METHOD 4: Full Page Regex & Next.js Embedded State
+                if tickets == 0:
+                    content = page.content()
+                    m = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)\s*(?:in\s+last|in\s+the\s+last)?\s*1\s*(?:hour|hr)', content, re.IGNORECASE)
+                    if not m:
+                        m = re.search(r'([\d\.]+[KMkm]?)\s*(?:tickets\s+bought|bought|booked)', content, re.IGNORECASE)
+                    if m:
+                        raw_text = m.group(0)
+                        tickets = parse_tickets(m.group(1))
 
-            rows_to_append.append([
-                now_ist, meta["title"], code, tickets, raw_text, "All India"
-            ])
-            print(f"-> {meta['title']}: {tickets} tickets ({raw_text})")
+            except Exception as e:
+                print(f"Error checking {meta['title']}: {e}")
+
+            rows_to_append.append([now_ist, meta["title"], code, tickets, raw_text, "All India"])
+            print(f"-> {meta['title']}: {tickets} ({raw_text})")
 
         browser.close()
 
-    # Step C: Write to Google Sheets
+    # Write to Sheet
     if rows_to_append:
-        print(f"\nWriting {len(rows_to_append)} rows to Google Sheets...")
+        print(f"\nPushing {len(rows_to_append)} rows to Google Sheets...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        print("Success! Google Sheet populated with velocity numbers.")
-    else:
-        print("No movie rows generated.")
+        print("Done! Data written to Google Sheet.")
 
 if __name__ == "__main__":
     run()
