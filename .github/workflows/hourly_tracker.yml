@@ -15,35 +15,33 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-          cache: pip
 
-      - name: Install Dependencies
+      - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            gspread \
-            google-auth \
-            pytz \
-            curl_cffi \
-            playwright
+          pip install gspread google-auth pytz curl_cffi playwright
 
+      - name: Install Playwright Chromium
+        run: |
           python -m playwright install --with-deps chromium
 
-      - name: Verify Files
+      - name: Verify Repository
         run: |
-          echo "Current directory:"
+          echo "Working directory:"
           pwd
 
           echo ""
-          echo "Repository files:"
+          echo "Repository contents:"
           ls -la
 
           echo ""
           echo "Checking tracker.py:"
-          test -f tracker.py && echo "tracker.py found" || {
-            echo "ERROR: tracker.py not found"
+          if [ ! -f tracker.py ]; then
+            echo "ERROR: tracker.py was not found"
             exit 1
-          }
+          fi
+
+          echo "tracker.py found successfully"
 
       - name: Run BMS Tracker
         env:
