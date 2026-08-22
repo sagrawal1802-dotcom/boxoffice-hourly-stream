@@ -3,653 +3,149 @@ import json
 import re
 import datetime
 import gspread
-
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
+SHEET_TAB_NAME = "FilmyView_Hourly"
+TARGET_HANDLE = "filmy_view"
 
-SHEET_TAB_NAME = "Toxic_26Aug"
-
-URL = "https://bfilmy.pages.dev/District%20Advance/"
-
-TARGET_DATE = "2026-08-26"
-
-RAW_FILE = "bfilmy_full_capture.json"
-MATCH_FILE = "bfilmy_toxic_matches.json"
-
-
-HEADERS = [
-    "Snapshot Timestamp (IST)",
-    "Show Date",
-    "State",
-    "City",
-    "Cinema Chain",
-    "Theatre",
-    "Movie",
-    "Event Code",
-    "Language",
-    "Format",
-    "Screen / Audi",
-    "Show Time",
-    "Total Seats",
-    "Available Seats",
-    "Booked / Sold Seats",
-    "Occupancy %",
-    "Source",
-    "Status"
-]
-
-
-def ist_now():
-    return (
-        datetime.datetime.now(datetime.timezone.utc)
-        + datetime.timedelta(hours=5, minutes=30)
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def walk(obj, path="$"):
-    yield path, obj
-
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield from walk(v, f"{path}.{k}")
-
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            yield from walk(v, f"{path}[{i}]")
-
-
-def stringify(obj):
+def parse_number(raw_str):
+    if not raw_str:
+        return 0
+    clean = re.sub(r"[^\d\.KMkm]", "", str(raw_str)).upper()
+    if "K" in clean:
+        try:
+            return int(float(clean.replace("K", "")) * 1000)
+        except ValueError:
+            return 0
+    elif "M" in clean:
+        try:
+            return int(float(clean.replace("M", "")) * 1000000)
+        except ValueError:
+            return 0
     try:
-        return json.dumps(
-            obj,
-            ensure_ascii=False
-        ).lower()
-    except Exception:
-        return str(obj).lower()
+        return int(float(clean))
+    except ValueError:
+        return 0
 
+def parse_tweet_content(text):
+    """
+    Parses patterns like:
+    #Toxic ROCK STEADY
+    12-1pm Tickets sold on BMS - 14200
+    Total from 6am - 125000
+    """
+    # 1. Movie name from hashtag or first line
+    movie_match = re.search(r'#([A-Za-z0-9_]+)', text)
+    movie = movie_match.group(1) if movie_match else "General Update"
 
-def text(value):
-    if value is None:
-        return ""
+    # 2. Time slot (e.g. 7-8am, 12-1pm, 8-9 PM)
+    time_slot_match = re.search(r'(\d{1,2}(?::\d{2})?\s*-\s*\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)', text)
+    time_slot = time_slot_match.group(1) if time_slot_match else "Latest Update"
 
-    if isinstance(value, (dict, list)):
-        return ""
+    # 3. Hourly tickets sold on BMS
+    hourly_match = re.search(r'(?:tickets\s*sold\s*on\s*bms|hourly|1\s*hr|in\s*last\s*1\s*hr)[\s:-]*([0-9,KMkm\.]+)', text, re.IGNORECASE)
+    if not hourly_match:
+        hourly_match = re.search(r'(?:sold|booked)[\s:-]*([0-9,KMkm\.]+)', text, re.IGNORECASE)
+    hourly_tickets = parse_number(hourly_match.group(1)) if hourly_match else 0
 
-    return re.sub(
-        r"\s+",
-        " ",
-        str(value)
-    ).strip()
+    # 4. Total/Cumulative tickets
+    total_match = re.search(r'(?:total\s*from\s*6am|total\s*bms|total)[\s:-]*([0-9,KMkm\.]+)', text, re.IGNORECASE)
+    total_tickets = parse_number(total_match.group(1)) if total_match else 0
 
-
-def find_keywords(obj):
-
-    s = stringify(obj)
-
-    keywords = [
-        "toxic",
-        "fairy tale",
-        "grown-ups",
-        "grownups",
-        "kurla",
-        "market city",
-        "pvr",
-        "26-08-2026",
-        "2026-08-26",
-        "26/08/2026",
-        "showtime",
-        "show_time",
-        "show time",
-        "available",
-        "booked",
-        "seats",
-        "seat"
-    ]
-
-    return [
-        k for k in keywords
-        if k in s
-    ]
-
-
-def compact(obj):
-
-    if isinstance(obj, dict):
-
-        result = {}
-
-        for k, v in obj.items():
-
-            if isinstance(v, (dict, list)):
-
-                result[k] = v
-
-            else:
-
-                result[k] = v
-
-        return result
-
-    return obj
-
-
-def connect_sheet():
-
-    sa_info = json.loads(
-        os.environ["GCP_SA_KEY"]
-    )
-
-    creds = Credentials.from_service_account_info(
-        sa_info,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets"
-        ]
-    )
-
-    client = gspread.authorize(creds)
-
-    spreadsheet = client.open_by_key(
-        SPREADSHEET_ID
-    )
-
-    try:
-
-        sheet = spreadsheet.worksheet(
-            SHEET_TAB_NAME
-        )
-
-    except gspread.exceptions.WorksheetNotFound:
-
-        sheet = spreadsheet.add_worksheet(
-            title=SHEET_TAB_NAME,
-            rows=5000,
-            cols=len(HEADERS)
-        )
-
-        sheet.append_row(
-            HEADERS,
-            value_input_option="USER_ENTERED"
-        )
-
-    values = sheet.get_all_values()
-
-    if not values:
-
-        sheet.append_row(
-            HEADERS,
-            value_input_option="USER_ENTERED"
-        )
-
-    return sheet
-
+    return movie, time_slot, hourly_tickets, total_tickets
 
 def run():
-
-    print(
-        "\n=============================================="
+    print("1. Connecting to Google Sheets...")
+    sa_info = json.loads(os.environ["GCP_SA_KEY"])
+    creds = Credentials.from_service_account_info(
+        sa_info, 
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
     )
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
-    print(
-        "BFILMY RAW STRUCTURE DIAGNOSTIC"
-    )
+    try:
+        sheet = spreadsheet.worksheet(SHEET_TAB_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(title=SHEET_TAB_NAME, rows=1000, cols=10)
+        sheet.append_row([
+            "Logged Timestamp (IST)", "Movie / Hashtag", "Time Window",
+            "Hourly Tickets (BMS)", "Total Cumulative (BMS)", "Raw Post Text", "Source Link"
+        ], value_input_option="USER_ENTERED")
 
-    print(
-        "=============================================="
-    )
+    now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+    parsed_posts = []
 
-    print(
-        "Date:",
-        TARGET_DATE
-    )
-
-    print(
-        "URL:",
-        URL
-    )
-
-    snapshot = ist_now()
-
-    print(
-        "\n1. Connecting to Google Sheets..."
-    )
-
-    sheet = connect_sheet()
-
-    captured = []
-
-    print(
-        "\n2. Launching Chromium..."
-    )
-
+    print(f"2. Fetching recent BMS posts from @{TARGET_HANDLE} on X...")
     with sync_playwright() as p:
-
         browser = p.chromium.launch(
-
             headless=True,
-
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage"
-            ]
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
         )
-
         context = browser.new_context(
-
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/124.0.0.0 "
-                "Safari/537.36"
-            ),
-
-            viewport={
-                "width": 1440,
-                "height": 1000
-            },
-
-            locale="en-IN",
-
-            timezone_id="Asia/Kolkata"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768}
         )
-
         page = context.new_page()
 
-        def response_handler(response):
+        # Check via Nitter / Public Syndication first to avoid login walls
+        profile_urls = [
+            f"https://nitter.net/{TARGET_HANDLE}",
+            f"https://xcancel.com/{TARGET_HANDLE}",
+            f"https://x.com/{TARGET_HANDLE}"
+        ]
 
+        raw_tweets = []
+        for url in profile_urls:
             try:
-
-                content_type = response.headers.get(
-                    "content-type",
-                    ""
-                ).lower()
-
-                if "json" not in content_type:
-                    return
-
-                body = response.text()
-
-                if not body:
-                    return
-
-                try:
-
-                    data = json.loads(body)
-
-                except Exception:
-
-                    return
-
-                captured.append({
-
-                    "url": response.url,
-
-                    "status": response.status,
-
-                    "content_type": content_type,
-
-                    "data": data
-
-                })
-
-            except Exception:
-                pass
-
-        page.on(
-            "response",
-            response_handler
-        )
-
-        print(
-            "\n3. Opening BFilmy..."
-        )
-
-        try:
-
-            response = page.goto(
-                URL,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
-
-            if response:
-
-                print(
-                    "HTTP status:",
-                    response.status
+                print(f"Checking {url}...")
+                page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
+                
+                # Extract text from tweet cards
+                tweets = page.eval_on_selector_all(
+                    "article, div.tweet-content, div[data-testid='tweetText']",
+                    "elements => elements.map(el => el.innerText)"
                 )
-
-        except Exception as e:
-
-            print(
-                "Navigation error:",
-                repr(e)
-            )
-
-        print(
-            "\n4. Waiting..."
-        )
-
-        page.wait_for_timeout(
-            10000
-        )
-
-        print(
-            "\n5. Scrolling..."
-        )
-
-        for _ in range(20):
-
-            try:
-
-                page.mouse.wheel(
-                    0,
-                    1600
-                )
-
-            except Exception:
-                pass
-
-            page.wait_for_timeout(
-                500
-            )
-
-        page.wait_for_timeout(
-            5000
-        )
-
-        try:
-
-            body = page.locator(
-                "body"
-            ).inner_text()
-
-            print(
-                "\nPage text:",
-                len(body)
-            )
-
-            print(
-                "Toxic in visible page:",
-                "toxic" in body.lower()
-            )
-
-        except Exception:
-            pass
-
-        try:
-
-            page.screenshot(
-                path="bfilmy_full.png",
-                full_page=True
-            )
-
-        except Exception:
-            pass
+                if tweets:
+                    raw_tweets = tweets
+                    print(f"Successfully retrieved {len(tweets)} recent posts.")
+                    break
+            except Exception as e:
+                print(f"Error accessing {url}: {e}")
 
         browser.close()
 
-    print(
-        "\n6. JSON responses captured:",
-        len(captured)
-    )
+    # Process and filter BMS tracking posts
+    existing_records = sheet.col_values(6)  # Check raw text column to prevent duplicates
 
-    # --------------------------------------------------------
-    # SAVE EVERYTHING
-    # --------------------------------------------------------
+    for text in raw_tweets:
+        if any(k in text.lower() for k in ["bms", "tickets sold", "booked", "hourly", "from 6am", "advance"]):
+            movie, time_slot, hourly, total = parse_tweet_content(text)
+            
+            # Avoid duplicate inserts
+            clean_snippet = text[:60].strip()
+            if not any(clean_snippet in str(r) for r in existing_records):
+                parsed_posts.append([
+                    now_ist,
+                    movie,
+                    time_slot,
+                    hourly,
+                    total,
+                    text.replace("\n", " ").strip(),
+                    f"https://x.com/{TARGET_HANDLE}"
+                ])
+                print(f"-> [{movie}] {time_slot} | Hourly: {hourly} | Total: {total}")
 
-    with open(
-        RAW_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            captured,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    print(
-        "Saved:",
-        RAW_FILE
-    )
-
-    # --------------------------------------------------------
-    # ANALYSE EVERY JSON RESPONSE
-    # --------------------------------------------------------
-
-    print(
-        "\n=============================================="
-    )
-
-    print(
-        "RESPONSE ANALYSIS"
-    )
-
-    print(
-        "=============================================="
-    )
-
-    all_matches = []
-
-    for response_number, response in enumerate(
-        captured,
-        start=1
-    ):
-
-        data = response["data"]
-
-        print(
-            f"\nJSON RESPONSE #{response_number}"
-        )
-
-        print(
-            "URL:",
-            response["url"]
-        )
-
-        print(
-            "Status:",
-            response["status"]
-        )
-
-        found = find_keywords(
-            data
-        )
-
-        print(
-            "Keywords:",
-            ", ".join(found)
-            if found
-            else "NONE"
-        )
-
-        # ----------------------------------------------------
-        # Every object containing relevant words
-        # ----------------------------------------------------
-
-        for path, obj in walk(data):
-
-            if not isinstance(
-                obj,
-                (dict, list)
-            ):
-
-                continue
-
-            keywords = find_keywords(
-                obj
-            )
-
-            if not keywords:
-                continue
-
-            # Don't save gigantic root structures repeatedly
-            if isinstance(obj, dict):
-
-                if len(obj) > 100:
-
-                    continue
-
-            match = {
-
-                "response_number":
-                    response_number,
-
-                "url":
-                    response["url"],
-
-                "path":
-                    path,
-
-                "keywords":
-                    keywords,
-
-                "object":
-                    compact(obj)
-
-            }
-
-            all_matches.append(
-                match
-            )
-
-            print(
-                "\nMATCH:",
-                path
-            )
-
-            print(
-                "Keywords:",
-                keywords
-            )
-
-            try:
-
-                preview = json.dumps(
-                    obj,
-                    ensure_ascii=False
-                )
-
-                if len(preview) > 2000:
-
-                    preview = preview[:2000] + "..."
-
-                print(
-                    preview
-                )
-
-            except Exception:
-                pass
-
-    # --------------------------------------------------------
-    # SAVE MATCHES
-    # --------------------------------------------------------
-
-    with open(
-        MATCH_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            all_matches,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    print(
-        "\n=============================================="
-    )
-
-    print(
-        "DIAGNOSTIC SUMMARY"
-    )
-
-    print(
-        "=============================================="
-    )
-
-    print(
-        "JSON responses:",
-        len(captured)
-    )
-
-    print(
-        "Relevant objects:",
-        len(all_matches)
-    )
-
-    print(
-        "Full capture:",
-        RAW_FILE
-    )
-
-    print(
-        "Relevant matches:",
-        MATCH_FILE
-    )
-
-    # --------------------------------------------------------
-    # GOOGLE SHEET STATUS
-    # --------------------------------------------------------
-
-    sheet.append_row(
-        [
-            snapshot,
-            TARGET_DATE,
-            "",
-            "",
-            "",
-            "",
-            "Toxic",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "BFilmy",
-            f"Diagnostic: {len(captured)} JSON responses; {len(all_matches)} relevant objects"
-        ],
-        value_input_option="USER_ENTERED"
-    )
-
-    print(
-        "\n=============================================="
-    )
-
-    print(
-        "RUN COMPLETE"
-    )
-
-    print(
-        "=============================================="
-    )
-
-    print(
-        "Upload/download these two files from the GitHub Action:"
-    )
-
-    print(
-        RAW_FILE
-    )
-
-    print(
-        MATCH_FILE
-    )
-
+    # 3. Write rows to Google Sheet
+    if parsed_posts:
+        print(f"\n3. Writing {len(parsed_posts)} updates to tab '{SHEET_TAB_NAME}'...")
+        sheet.append_rows(parsed_posts, value_input_option="USER_ENTERED")
+        print("Success! Google Sheet updated with @filmy_view updates.")
+    else:
+        print("No new BMS tracking posts found in this hourly cycle.")
 
 if __name__ == "__main__":
     run()
