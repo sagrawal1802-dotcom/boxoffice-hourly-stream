@@ -3,103 +3,227 @@ import json
 import re
 import datetime
 import gspread
-
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
 
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 
-DEBUG_FILE = "bms_discover_debug.json"
+DEBUG_FILE = "bms_full_debug.json"
 
 
-def save_debug(data):
-    try:
-        with open(
-            DEBUG_FILE,
-            "w",
-            encoding="utf-8"
-        ) as f:
+# =========================================================
+# TICKET PARSER
+# =========================================================
 
-            json.dump(
-                data,
-                f,
-                ensure_ascii=False,
-                indent=2
+def parse_tickets(raw_str):
+    if raw_str is None:
+        return 0
+
+    text = str(raw_str).strip().replace(",", "")
+
+    match = re.search(
+        r"(\d+(?:\.\d+)?)\s*([KM]?)",
+        text,
+        re.IGNORECASE
+    )
+
+    if not match:
+        return 0
+
+    number = float(match.group(1))
+    suffix = match.group(2).upper()
+
+    if suffix == "K":
+        number *= 1000
+    elif suffix == "M":
+        number *= 1000000
+
+    return int(number)
+
+
+# =========================================================
+# POSSIBLE TRENDING TEXT
+# =========================================================
+
+def find_trending_text(text):
+
+    if not text:
+        return []
+
+    patterns = [
+
+        r".{0,300}(?:trending|trend).{0,500}",
+
+        r".{0,300}(?:tickets?\s+bought).{0,500}",
+
+        r".{0,300}(?:tickets?\s+booked).{0,500}",
+
+        r".{0,300}(?:booking\s+velocity).{0,500}",
+
+        r".{0,300}(?:recent\s+bookings?).{0,500}",
+
+        r".{0,300}(?:ticket\s+count).{0,500}",
+
+        r".{0,300}(?:booked).{0,500}",
+
+        r".{0,300}(?:bought).{0,500}"
+    ]
+
+    results = []
+
+    for pattern in patterns:
+
+        try:
+
+            matches = re.findall(
+                pattern,
+                text,
+                re.IGNORECASE | re.DOTALL
             )
 
-    except Exception as e:
+            for match in matches:
 
-        print(
-            "Could not save debug file:",
-            e
-        )
+                cleaned = re.sub(
+                    r"\s+",
+                    " ",
+                    match
+                ).strip()
 
+                if cleaned and cleaned not in results:
+                    results.append(cleaned[:1500])
+
+        except Exception:
+            pass
+
+    return results[:100]
+
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def run():
 
+    # -----------------------------------------------------
+    # RESET DEBUG FILE
+    # -----------------------------------------------------
+
+    debug_data = {
+        "started_at": datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat(),
+        "requests": [],
+        "responses": [],
+        "movies": [],
+        "page_text": "",
+        "page_html_matches": []
+    }
+
+    with open(
+        DEBUG_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            debug_data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
     print(
-        "========================================"
+        "=============================================="
     )
 
     print(
-        "BOOKMYSHOW DISCOVER API CAPTURE"
+        "BOOKMYSHOW MOVIE + API DEBUG TRACKER"
     )
 
     print(
-        "========================================"
+        "=============================================="
     )
+
+    # =====================================================
+    # GOOGLE SHEETS
+    # =====================================================
+
+    print(
+        "\n1. Connecting to Google Sheets..."
+    )
+
+    sa_info = json.loads(
+        os.environ["GCP_SA_KEY"]
+    )
+
+    creds = Credentials.from_service_account_info(
+        sa_info,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets"
+        ]
+    )
+
+    client = gspread.authorize(
+        creds
+    )
+
+    spreadsheet = client.open_by_key(
+        SPREADSHEET_ID
+    )
+
+    sheet = spreadsheet.get_worksheet(0)
+
+    header = sheet.row_values(1)
+
+    if not header or header[0] != "Timestamp (IST)":
+
+        sheet.insert_row(
+            [
+                "Timestamp (IST)",
+                "Movie Title",
+                "Event Code",
+                "Tickets Sold (Last 1 Hr)",
+                "Raw Status Text",
+                "Scope"
+            ],
+            1
+        )
+
+    # =====================================================
+    # TIME
+    # =====================================================
+
+    now_utc = datetime.datetime.now(
+        datetime.timezone.utc
+    )
+
+    now_ist = (
+        now_utc
+        + datetime.timedelta(
+            hours=5,
+            minutes=30
+        )
+    ).strftime(
+        "%Y-%m-%d %H:00:00"
+    )
+
+    # =====================================================
+    # STORAGE
+    # =====================================================
+
+    unique_movies = {}
+
+    captured_requests = []
 
     captured_responses = []
 
-    requests_seen = []
-
-    # --------------------------------------------------
-    # GOOGLE SHEETS CONNECTION
-    # --------------------------------------------------
-
-    print(
-        "\nConnecting to Google Sheets..."
-    )
-
-    try:
-
-        sa_info = json.loads(
-            os.environ["GCP_SA_KEY"]
-        )
-
-        creds = Credentials.from_service_account_info(
-            sa_info,
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets"
-            ]
-        )
-
-        client = gspread.authorize(
-            creds
-        )
-
-        spreadsheet = client.open_by_key(
-            SPREADSHEET_ID
-        )
-
-        print(
-            "Google Sheets connected."
-        )
-
-    except Exception as e:
-
-        print(
-            "Google Sheets connection error:",
-            e
-        )
-
-    # --------------------------------------------------
+    # =====================================================
     # PLAYWRIGHT
-    # --------------------------------------------------
+    # =====================================================
 
     print(
-        "\nStarting browser..."
+        "\n2. Starting browser..."
     )
 
     with sync_playwright() as p:
@@ -109,9 +233,9 @@ def run():
             headless=True,
 
             args=[
+                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled"
+                "--disable-setuid-sandbox"
             ]
         )
 
@@ -127,8 +251,8 @@ def run():
             ),
 
             viewport={
-                "width": 1440,
-                "height": 900
+                "width": 1366,
+                "height": 768
             },
 
             locale="en-IN",
@@ -138,47 +262,53 @@ def run():
 
         page = context.new_page()
 
-        # --------------------------------------------------
-        # CAPTURE REQUESTS
-        # --------------------------------------------------
+        # =================================================
+        # REQUEST LOGGER
+        # =================================================
 
         def on_request(request):
 
             try:
 
+                resource_type = request.resource_type
+
+                if resource_type not in [
+                    "xhr",
+                    "fetch"
+                ]:
+                    return
+
                 url = request.url
 
-                if (
-                    "/api/explore/v1/discover/"
-                    in url
-                ):
+                item = {
+                    "type": resource_type,
+                    "method": request.method,
+                    "url": url,
+                    "post_data": None
+                }
+
+                try:
+
+                    item["post_data"] = (
+                        request.post_data
+                    )
+
+                except Exception:
+                    pass
+
+                captured_requests.append(
+                    item
+                )
+
+                # Print only BMS API requests
+                if "bookmyshow.com/api/" in url:
 
                     print(
-                        "\nDISCOVER REQUEST:"
+                        "\n[BMS API REQUEST]"
                     )
 
                     print(
                         url
-                    )
-
-                    request_info = {
-                        "url": url,
-                        "method": request.method,
-                        "resource_type": request.resource_type,
-                        "post_data": None
-                    }
-
-                    try:
-
-                        request_info[
-                            "post_data"
-                        ] = request.post_data
-
-                    except Exception:
-                        pass
-
-                    requests_seen.append(
-                        request_info
                     )
 
             except Exception:
@@ -189,395 +319,540 @@ def run():
             on_request
         )
 
-        # --------------------------------------------------
-        # CAPTURE DISCOVER API RESPONSE
-        # --------------------------------------------------
+        # =================================================
+        # RESPONSE LOGGER
+        # =================================================
 
         def on_response(response):
 
             try:
 
-                url = response.url
+                request = response.request
 
-                if (
-                    "/api/explore/v1/discover/"
-                    not in url
-                ):
+                if request.resource_type not in [
+                    "xhr",
+                    "fetch"
+                ]:
                     return
 
-                print(
-                    "\n"
-                    + "=" * 90
-                )
+                url = response.url
 
-                print(
-                    "DISCOVER API RESPONSE FOUND"
-                )
-
-                print(
-                    "URL:"
-                )
-
-                print(
-                    url
-                )
-
-                print(
-                    "STATUS:",
-                    response.status
-                )
-
-                print(
-                    "=" * 90
-                )
+                # We mainly want BookMyShow responses
+                if (
+                    "bookmyshow.com" not in
+                    url.lower()
+                ):
+                    return
 
                 try:
 
                     body = response.text()
 
-                except Exception as e:
-
-                    print(
-                        "Could not read response:",
-                        e
-                    )
+                except Exception:
 
                     return
 
                 if not body:
-
-                    print(
-                        "Empty response."
-                    )
-
                     return
 
-                # --------------------------------------------------
-                # TRY JSON
-                # --------------------------------------------------
-
-                try:
-
-                    parsed = json.loads(
-                        body
-                    )
-
-                except Exception:
-
-                    parsed = None
-
-                response_data = {
-
+                # Save response
+                item = {
                     "url": url,
-
                     "status": response.status,
-
                     "content_type":
                         response.headers.get(
                             "content-type",
                             ""
                         ),
-
-                    "body_length":
-                        len(body),
-
-                    "body_text":
-                        body[:200000],
-
-                    "json":
-                        parsed
+                    "body": body[:150000]
                 }
 
                 captured_responses.append(
-                    response_data
+                    item
                 )
 
-                print(
-                    "Response size:",
-                    len(body)
-                )
+                # Look for potentially useful content
+                lower = body.lower()
 
-                print(
-                    "\nFIRST 5000 CHARACTERS:"
-                )
+                interesting_words = [
+                    "trending",
+                    "trend",
+                    "velocity",
+                    "ticket",
+                    "booking",
+                    "booked",
+                    "bought",
+                    "recent"
+                ]
 
-                print(
-                    body[:5000]
-                )
+                matched = [
+                    x
+                    for x in interesting_words
+                    if x in lower
+                ]
 
-                print(
-                    "\nSaved in memory."
-                )
+                if matched:
 
-            except Exception as e:
+                    print(
+                        "\n------------------------------------------"
+                    )
 
-                print(
-                    "Response capture error:",
-                    e
-                )
+                    print(
+                        "[INTERESTING BMS RESPONSE]"
+                    )
+
+                    print(
+                        "URL:",
+                        url
+                    )
+
+                    print(
+                        "STATUS:",
+                        response.status
+                    )
+
+                    print(
+                        "MATCHED:",
+                        ", ".join(matched)
+                    )
+
+                    # Show snippets
+                    snippets = find_trending_text(
+                        body
+                    )
+
+                    for snippet in snippets[:10]:
+
+                        print(
+                            "\nSNIPPET:"
+                        )
+
+                        print(
+                            snippet
+                        )
+
+            except Exception:
+                pass
 
         page.on(
             "response",
             on_response
         )
 
-        # --------------------------------------------------
+        # =================================================
         # OPEN MOVIE LISTING
-        # --------------------------------------------------
-
-        url = (
-            "https://in.bookmyshow.com/"
-            "explore/movies-mumbai"
-        )
+        # =================================================
 
         print(
-            "\nOpening:"
-        )
-
-        print(
-            url
+            "\n3. Opening Mumbai movie listing..."
         )
 
         try:
 
             page.goto(
-                url,
+                "https://in.bookmyshow.com/explore/movies-mumbai",
                 wait_until="domcontentloaded",
-                timeout=60000
+                timeout=30000
             )
 
         except Exception as e:
 
             print(
-                "Page navigation error:",
+                "Explore error:",
                 e
             )
 
-        # --------------------------------------------------
-        # WAIT FOR INITIAL API CALLS
-        # --------------------------------------------------
-
-        print(
-            "\nWaiting for BookMyShow API calls..."
-        )
+        # IMPORTANT:
+        # Same waiting approach that worked for movie discovery
 
         page.wait_for_timeout(
-            10000
+            5000
         )
 
-        # --------------------------------------------------
+        # =================================================
         # SCROLL
-        # --------------------------------------------------
+        # =================================================
 
         print(
-            "\nScrolling to trigger additional pages..."
+            "\n4. Loading more movies..."
         )
 
-        for i in range(12):
+        for i in range(8):
 
             print(
                 "Scroll",
                 i + 1,
-                "of 12"
+                "/ 8"
             )
 
             try:
 
                 page.evaluate(
-                    "window.scrollBy(0, 1200)"
+                    "window.scrollBy(0, 1500)"
                 )
 
             except Exception:
                 pass
 
             page.wait_for_timeout(
-                2000
+                1200
             )
 
-        # --------------------------------------------------
-        # EXTRA WAIT
-        # --------------------------------------------------
-
-        print(
-            "\nWaiting for final API responses..."
-        )
-
+        # Extra wait for API calls
         page.wait_for_timeout(
-            10000
+            5000
         )
 
-        # --------------------------------------------------
-        # CAPTURE CURRENT PAGE DATA
-        # --------------------------------------------------
+        # =================================================
+        # DISCOVER MOVIES
+        # =================================================
 
         print(
-            "\nCapturing page information..."
+            "\n5. Discovering active movies..."
         )
 
-        page_info = {}
+        try:
+
+            links = page.eval_on_selector_all(
+                "a",
+                """
+                elements =>
+                    elements
+                    .map(el => ({
+                        href: el.getAttribute('href'),
+                        text: el.innerText
+                    }))
+                    .filter(x => x.href)
+                """
+            )
+
+            print(
+                "Links found:",
+                len(links)
+            )
+
+            for item in links:
+
+                href = item["href"]
+
+                # SAME REGEX AS YOUR ORIGINAL WORKING CODE
+
+                match = re.search(
+                    r"/movies/[^/]+/([a-z0-9-]+)/(ET\d{6,10})",
+                    href,
+                    re.IGNORECASE
+                )
+
+                if not match:
+                    continue
+
+                slug = match.group(1)
+
+                code = match.group(2)
+
+                title = (
+                    slug
+                    .replace("-", " ")
+                    .title()
+                )
+
+                if code not in unique_movies:
+
+                    unique_movies[code] = {
+
+                        "title": title,
+
+                        "url": (
+                            href
+                            if href.startswith("http")
+                            else
+                            "https://in.bookmyshow.com"
+                            + href
+                        ),
+
+                        "code": code
+                    }
+
+        except Exception as e:
+
+            print(
+                "Movie extraction error:",
+                e
+            )
+
+        print(
+            "\nFOUND MOVIES:",
+            len(unique_movies)
+        )
+
+        for code, movie in unique_movies.items():
+
+            print(
+                movie["title"],
+                "|",
+                code
+            )
+
+        # =================================================
+        # CAPTURE VISIBLE TEXT
+        # =================================================
+
+        print(
+            "\n6. Capturing listing-page text..."
+        )
+
+        page_text = ""
 
         try:
 
-            page_info[
-                "title"
-            ] = page.title()
-
-        except Exception:
-
-            page_info[
-                "title"
-            ] = ""
-
-        try:
-
-            page_info[
-                "url"
-            ] = page.url
-
-        except Exception:
-
-            page_info[
-                "url"
-            ] = ""
-
-        try:
-
-            page_info[
-                "body_text"
-            ] = page.locator(
+            page_text = page.locator(
                 "body"
             ).inner_text(
                 timeout=10000
-            )[:50000]
+            )
 
-        except Exception:
+            print(
+                "Page text length:",
+                len(page_text)
+            )
 
-            page_info[
-                "body_text"
-            ] = ""
+        except Exception as e:
 
-        # --------------------------------------------------
-        # SAVE DEBUG
-        # --------------------------------------------------
+            print(
+                "Could not capture page text:",
+                e
+            )
 
-        final_data = {
+        # =================================================
+        # CAPTURE HTML
+        # =================================================
+
+        print(
+            "\n7. Searching page HTML..."
+        )
+
+        html_matches = []
+
+        try:
+
+            html = page.content()
+
+            html_lower = html.lower()
+
+            search_words = [
+                "trending",
+                "trend",
+                "ticket",
+                "booking",
+                "booked",
+                "bought",
+                "velocity"
+            ]
+
+            for word in search_words:
+
+                positions = [
+                    m.start()
+                    for m in re.finditer(
+                        word,
+                        html_lower
+                    )
+                ]
+
+                for pos in positions[:20]:
+
+                    start = max(
+                        0,
+                        pos - 1000
+                    )
+
+                    end = min(
+                        len(html),
+                        pos + 3000
+                    )
+
+                    html_matches.append(
+                        {
+                            "keyword": word,
+                            "snippet":
+                                html[start:end]
+                        }
+                    )
+
+        except Exception as e:
+
+            print(
+                "HTML capture error:",
+                e
+            )
+
+        print(
+            "HTML matches:",
+            len(html_matches)
+        )
+
+        # =================================================
+        # WAIT A LITTLE MORE FOR API RESPONSES
+        # =================================================
+
+        print(
+            "\n8. Final API wait..."
+        )
+
+        page.wait_for_timeout(
+            5000
+        )
+
+        # =================================================
+        # SAVE DEBUG FILE
+        # =================================================
+
+        print(
+            "\n9. Saving debug information..."
+        )
+
+        debug_data = {
 
             "generated_at":
                 datetime.datetime.now(
                     datetime.timezone.utc
                 ).isoformat(),
 
-            "page":
-                page_info,
+            "movie_count":
+                len(unique_movies),
 
-            "discover_requests":
-                requests_seen,
+            "movies":
+                list(
+                    unique_movies.values()
+                ),
 
-            "discover_responses":
+            "requests":
+                captured_requests,
+
+            "responses":
                 captured_responses,
 
-            "response_count":
-                len(captured_responses)
+            "page_text":
+                page_text[:100000],
+
+            "page_html_matches":
+                html_matches[:200]
         }
-
-        save_debug(
-            final_data
-        )
-
-        # --------------------------------------------------
-        # SCREENSHOT
-        # --------------------------------------------------
 
         try:
 
-            page.screenshot(
-                path="bms_discover_page.png",
-                full_page=True
+            with open(
+                DEBUG_FILE,
+                "w",
+                encoding="utf-8"
+            ) as f:
+
+                json.dump(
+                    debug_data,
+                    f,
+                    ensure_ascii=False,
+                    indent=2
+                )
+
+            print(
+                "DEBUG FILE CREATED:"
             )
 
             print(
-                "\nScreenshot saved:"
-            )
-
-            print(
-                "bms_discover_page.png"
+                DEBUG_FILE
             )
 
         except Exception as e:
 
             print(
-                "Screenshot error:",
+                "Debug file error:",
                 e
+            )
+
+        # =================================================
+        # WRITE MOVIES TO GOOGLE SHEET
+        # =================================================
+
+        print(
+            "\n10. Writing movie data to Google Sheet..."
+        )
+
+        rows_to_append = []
+
+        for code, movie in unique_movies.items():
+
+            # We are NOT claiming a Trending number yet.
+            # This is intentionally diagnostic.
+
+            rows_to_append.append(
+                [
+                    now_ist,
+                    movie["title"],
+                    code,
+                    0,
+                    "API Diagnostic - Trending Not Yet Extracted",
+                    "All India"
+                ]
+            )
+
+        if rows_to_append:
+
+            sheet.append_rows(
+                rows_to_append,
+                value_input_option="USER_ENTERED"
+            )
+
+            print(
+                "Movie rows written:",
+                len(rows_to_append)
             )
 
         browser.close()
 
-    # --------------------------------------------------
-    # FINAL
-    # --------------------------------------------------
+    # =====================================================
+    # FINISH
+    # =====================================================
 
     print(
         "\n"
-        + "=" * 90
+        + "=" * 70
     )
 
     print(
-        "CAPTURE COMPLETE"
+        "COMPLETE"
     )
 
     print(
-        "=" * 90
+        "=" * 70
     )
 
     print(
-        "Discover requests:",
-        len(requests_seen)
+        "Movies found:",
+        len(unique_movies)
     )
 
     print(
-        "Discover responses:",
+        "API requests captured:",
+        len(captured_requests)
+    )
+
+    print(
+        "API responses captured:",
         len(captured_responses)
     )
 
     print(
-        "\nDEBUG FILE:"
-    )
-
-    print(
+        "Debug file:",
         DEBUG_FILE
     )
 
-    if len(captured_responses) == 0:
-
-        print(
-            "\nWARNING:"
-        )
-
-        print(
-            "No /api/explore/v1/discover/ "
-            "responses were captured."
-        )
-
-        print(
-            "This means BookMyShow may be "
-            "loading the data through another "
-            "mechanism."
-        )
-
-    else:
-
-        print(
-            "\nSUCCESS:"
-        )
-
-        print(
-            "The actual Discover API responses "
-            "have been captured."
-        )
+    print(
+        "\nIMPORTANT:"
+    )
 
     print(
-        "\nNow download bms_discover_debug.json "
-        "from the GitHub Actions artifact."
+        "Download bms_full_debug.json "
+        "from your GitHub Actions run."
     )
 
 
