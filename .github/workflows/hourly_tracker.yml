@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install curl_cffi beautifulsoup4 gspread google-auth
+          pip install curl_cffi beautifulsoup4 lxml gspread google-auth
 
       - name: Run Box Office Tracker
         env:
