@@ -1,18 +1,16 @@
 import os
-import re
 import json
 import base64
 from datetime import datetime
 
 import pytz
 import gspread
-
+from curl_cffi import requests
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 SPREADSHEET_ID = os.environ.get(
@@ -25,41 +23,42 @@ GCP_SA_KEY = (
     or os.environ.get("GCP_SA_KEY")
 )
 
-# First test: exact Toxic show from our HAR
+PROXY_URL = os.environ.get("PROXY_URL")
+
+SHEET_TAB_NAME = "Toxic_BMS_Raw"
+
+
+# ============================================================
+# TOXIC TEST SHOW FROM HAR
+# ============================================================
+
 EVENT_CODE = "ET00379311"
 VENUE_CODE = "CSWO"
 SESSION_ID = "15925"
+
 DATE_CODE = "20260826"
 
 CITY = "mumbai"
-
-SEAT_URL = (
-    f"https://in.bookmyshow.com/movies/{CITY}/seat-layout/"
-    f"{EVENT_CODE}/{VENUE_CODE}/{SESSION_ID}/{DATE_CODE}"
-)
-
-SHEET_TAB_NAME = "Toxic_BMS_Test"
 
 
 # ============================================================
 # GOOGLE SHEETS
 # ============================================================
 
-def init_google_sheet():
+def get_google_sheet():
 
     if not GCP_SA_KEY:
         raise ValueError(
-            "Missing GCP_SA_KEY_B64 or GCP_SA_KEY"
+            "GCP_SA_KEY_B64 / GCP_SA_KEY is missing"
         )
 
-    raw_data = GCP_SA_KEY.strip()
+    raw = GCP_SA_KEY.strip()
 
-    if raw_data.startswith("{"):
-        sa_json = json.loads(raw_data)
-
+    if raw.startswith("{"):
+        service_account = json.loads(raw)
     else:
-        sa_json = json.loads(
-            base64.b64decode(raw_data).decode("utf-8")
+        service_account = json.loads(
+            base64.b64decode(raw).decode("utf-8")
         )
 
     scopes = [
@@ -67,14 +66,19 @@ def init_google_sheet():
         "https://www.googleapis.com/auth/drive"
     ]
 
-    creds = Credentials.from_service_account_info(
-        sa_json,
-        scopes=scopes
+    credentials = (
+        Credentials
+        .from_service_account_info(
+            service_account,
+            scopes=scopes
+        )
     )
 
-    gc = gspread.authorize(creds)
+    client = gspread.authorize(
+        credentials
+    )
 
-    spreadsheet = gc.open_by_key(
+    spreadsheet = client.open_by_key(
         SPREADSHEET_ID
     )
 
@@ -88,358 +92,246 @@ def init_google_sheet():
 
         sheet = spreadsheet.add_worksheet(
             title=SHEET_TAB_NAME,
-            rows="5000",
-            cols="20"
+            rows=5000,
+            cols=20
         )
 
-        headers = [
+        sheet.append_row([
             "Timestamp IST",
             "Event Code",
             "Venue Code",
             "Session ID",
             "Date",
             "City",
-            "Seat URL",
-            "Potential Seat Elements",
-            "Available",
-            "Booked",
-            "Selected",
-            "Other Seat Elements"
-        ]
-
-        sheet.append_row(
-            headers,
-            value_input_option="USER_ENTERED"
-        )
+            "HTTP Status",
+            "Success",
+            "Exception",
+            "Raw Data Length",
+            "Raw Data Preview"
+        ])
 
     return sheet
 
 
 # ============================================================
-# SEAT ANALYSIS
+# BMS GETSEATLAYOUT
 # ============================================================
 
-def analyse_seats(page):
+def get_seat_layout():
 
-    available = 0
-    booked = 0
-    selected = 0
-    other = 0
-
-    seat_details = []
-
-    # --------------------------------------------------------
-    # Find elements with aria-label
-    # --------------------------------------------------------
-
-    elements = page.locator(
-        "[aria-label]"
+    url = (
+        "https://services-in.bookmyshow.com/"
+        "doTrans.aspx"
     )
 
-    total_elements = elements.count()
-
-    print(
-        f"ARIA elements found: {total_elements}"
-    )
-
-    for i in range(total_elements):
-
-        try:
-
-            element = elements.nth(i)
-
-            aria = element.get_attribute(
-                "aria-label"
-            )
-
-            if not aria:
-                continue
-
-            text = aria.strip().lower()
-
-            # Only inspect likely seat elements
-            if not any(
-                keyword in text
-                for keyword in [
-                    "seat",
-                    "available",
-                    "booked",
-                    "selected"
-                ]
-            ):
-                continue
-
-            seat_details.append(
-                {
-                    "aria": aria,
-                    "class": element.get_attribute(
-                        "class"
-                    ),
-                    "data-seat-id": element.get_attribute(
-                        "data-seat-id"
-                    ),
-                    "data-testid": element.get_attribute(
-                        "data-testid"
-                    )
-                }
-            )
-
-            if "available" in text:
-                available += 1
-
-            elif "booked" in text:
-                booked += 1
-
-            elif "selected" in text:
-                selected += 1
-
-            else:
-                other += 1
-
-        except Exception:
-            continue
-
-    # --------------------------------------------------------
-    # Additional selectors
-    # --------------------------------------------------------
-
-    selector_counts = {}
-
-    selectors = [
-        '[data-seat-id]',
-        '[data-testid*="seat" i]',
-        '[class*="seat" i]'
-    ]
-
-    for selector in selectors:
-
-        try:
-
-            selector_counts[selector] = (
-                page.locator(
-                    selector
-                ).count()
-            )
-
-        except Exception:
-
-            selector_counts[selector] = 0
-
-    print()
-    print("Seat selector counts:")
-
-    for selector, count in selector_counts.items():
-
-        print(
-            f"{selector}: {count}"
-        )
-
-    return {
-        "available": available,
-        "booked": booked,
-        "selected": selected,
-        "other": other,
-        "potential": len(seat_details),
-        "seat_details": seat_details,
-        "selector_counts": selector_counts
+    payload = {
+        "strCommand": "GETSEATLAYOUT",
+        "strVenueCode": VENUE_CODE,
+        "strParam1": SESSION_ID,
+        "strParam2": "WEB",
+        "strParam5": "Y",
+        "strParam6": "Y",
+        "strParam7": "N",
+        "strFormat": "json"
     }
 
+    headers = {
 
-# ============================================================
-# BMS SEAT PAGE
-# ============================================================
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/151.0.0.0 "
+            "Safari/537.36"
+        ),
 
-def fetch_bms_seat_data():
+        "Accept": (
+            "application/json, text/plain, */*"
+        ),
+
+        "Content-Type": (
+            "application/x-www-form-urlencoded; "
+            "charset=UTF-8"
+        ),
+
+        "Origin": (
+            "https://in.bookmyshow.com"
+        ),
+
+        "Referer": (
+            "https://in.bookmyshow.com/"
+        )
+    }
+
+    proxies = None
+
+    if PROXY_URL:
+
+        proxies = {
+            "http": PROXY_URL,
+            "https": PROXY_URL
+        }
 
     print()
     print("=" * 70)
-    print("OPENING BOOKMYSHOW")
+    print("BMS GETSEATLAYOUT")
     print("=" * 70)
 
-    print(
-        f"URL: {SEAT_URL}"
-    )
+    print("URL:")
+    print(url)
 
-    with sync_playwright() as p:
+    print()
+    print("PAYLOAD:")
+    print(payload)
 
-        browser = p.chromium.launch(
-            headless=True
+    try:
+
+        response = requests.post(
+
+            url,
+
+            data=payload,
+
+            headers=headers,
+
+            proxies=proxies,
+
+            impersonate="chrome120",
+
+            timeout=30
         )
 
-        context = browser.new_context(
-            viewport={
-                "width": 1440,
-                "height": 1000
-            },
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/151.0.0.0 "
-                "Safari/537.36"
-            )
+    except Exception as e:
+
+        print()
+        print("REQUEST ERROR:")
+        print(repr(e))
+
+        return None
+
+    print()
+    print("HTTP STATUS:")
+    print(response.status_code)
+
+    print()
+    print("RESPONSE SIZE:")
+    print(len(response.text))
+
+    print()
+    print("RESPONSE PREVIEW:")
+    print(response.text[:1000])
+
+    return response
+
+
+# ============================================================
+# PROCESS RESPONSE
+# ============================================================
+
+def process_response(response):
+
+    if response is None:
+        return None
+
+    result = {
+        "http_status": response.status_code,
+        "success": False,
+        "exception": "",
+        "raw_data_length": len(response.text),
+        "raw_data_preview": response.text[:500]
+    }
+
+    try:
+
+        data = response.json()
+
+        print()
+        print("=" * 70)
+        print("JSON RESPONSE")
+        print("=" * 70)
+
+        print(
+            json.dumps(
+                data,
+                indent=2,
+                ensure_ascii=False
+            )[:5000]
         )
 
-        page = context.new_page()
-
-        # ----------------------------------------------------
-        # Network logging
-        # ----------------------------------------------------
-
-        def on_request(request):
-
-            url = request.url.lower()
-
-            if (
-                "seatlayout" in url
-                or "dotrans" in url
-                or "seat" in url
-            ):
-
-                print()
-                print("BMS REQUEST")
-                print(request.method)
-                print(request.url)
-
-                if request.post_data:
-
-                    print(
-                        "POST DATA:"
-                    )
-
-                    print(
-                        request.post_data[:2000]
-                    )
-
-        page.on(
-            "request",
-            on_request
-        )
-
-        def on_response(response):
-
-            url = response.url.lower()
-
-            if (
-                "seatlayout" in url
-                or "dotrans" in url
-                or "seat" in url
-            ):
-
-                print()
-                print("BMS RESPONSE")
-                print(
-                    response.status,
-                    response.url
+        result["success"] = (
+            str(
+                data.get(
+                    "blnSuccess",
+                    ""
                 )
-
-        page.on(
-            "response",
-            on_response
+            ).lower()
+            == "true"
         )
 
-        # ----------------------------------------------------
-        # Open page
-        # ----------------------------------------------------
-
-        try:
-
-            page.goto(
-                SEAT_URL,
-                wait_until="domcontentloaded",
-                timeout=60000
+        result["exception"] = str(
+            data.get(
+                "strException",
+                ""
             )
+        )
 
-        except Exception as e:
+        if "strData" in data:
+
+            raw_data = data["strData"]
+
+            print()
+            print(
+                "strData found!"
+            )
 
             print(
-                "Page load warning:",
-                e
-            )
-
-        print()
-        print(
-            "Waiting 15 seconds for BMS..."
-        )
-
-        page.wait_for_timeout(
-            15000
-        )
-
-        # ----------------------------------------------------
-        # Page text
-        # ----------------------------------------------------
-
-        try:
-
-            body_text = page.locator(
-                "body"
-            ).inner_text()
-
-        except Exception:
-
-            body_text = ""
-
-        print()
-        print("=" * 70)
-        print("BMS PAGE TEXT")
-        print("=" * 70)
-
-        print(
-            body_text[:5000]
-        )
-
-        # ----------------------------------------------------
-        # Analyse seats
-        # ----------------------------------------------------
-
-        print()
-        print("=" * 70)
-        print("ANALYSING SEATS")
-        print("=" * 70)
-
-        seat_data = analyse_seats(
-            page
-        )
-
-        # ----------------------------------------------------
-        # Screenshot
-        # ----------------------------------------------------
-
-        try:
-
-            page.screenshot(
-                path="toxic_seat_layout.png",
-                full_page=True
+                "strData length:",
+                len(raw_data)
             )
 
             print()
             print(
-                "Screenshot saved."
+                "strData preview:"
             )
-
-        except Exception as e:
 
             print(
-                "Screenshot error:",
-                e
+                raw_data[:1000]
             )
 
-        browser.close()
+            result["raw_data_length"] = len(
+                raw_data
+            )
 
-        return seat_data
+            result["raw_data_preview"] = (
+                raw_data[:500]
+            )
+
+    except Exception as e:
+
+        print()
+        print(
+            "Could not parse JSON:"
+        )
+
+        print(
+            repr(e)
+        )
+
+        result["exception"] = str(e)
+
+    return result
 
 
 # ============================================================
-# GOOGLE SHEET LOGGING
+# SAVE RESULT
 # ============================================================
 
-def save_to_google_sheet(
-    seat_data
-):
+def save_result(result):
 
-    sheet = init_google_sheet()
+    if not result:
+        return
+
+    sheet = get_google_sheet()
 
     ist = pytz.timezone(
         "Asia/Kolkata"
@@ -449,7 +341,7 @@ def save_to_google_sheet(
         ist
     )
 
-    row = [
+    sheet.append_row([
 
         now.strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -465,27 +357,21 @@ def save_to_google_sheet(
 
         CITY,
 
-        SEAT_URL,
+        result["http_status"],
 
-        seat_data["potential"],
+        result["success"],
 
-        seat_data["available"],
+        result["exception"],
 
-        seat_data["booked"],
+        result["raw_data_length"],
 
-        seat_data["selected"],
+        result["raw_data_preview"]
 
-        seat_data["other"]
-    ]
-
-    sheet.append_row(
-        row,
-        value_input_option="USER_ENTERED"
-    )
+    ], value_input_option="USER_ENTERED")
 
     print()
     print(
-        "Google Sheet updated."
+        "Result saved to Google Sheets."
     )
 
 
@@ -497,80 +383,38 @@ def main():
 
     print()
     print("=" * 70)
-    print("TOXIC BMS SEAT TRACKER")
+    print("TOXIC BMS DIRECT SEAT TEST")
     print("=" * 70)
 
     print(
-        f"Event:   {EVENT_CODE}"
+        "Event:",
+        EVENT_CODE
     )
 
     print(
-        f"Venue:   {VENUE_CODE}"
+        "Venue:",
+        VENUE_CODE
     )
 
     print(
-        f"Session: {SESSION_ID}"
+        "Session:",
+        SESSION_ID
     )
 
-    print(
-        f"Date:    {DATE_CODE}"
+    response = get_seat_layout()
+
+    result = process_response(
+        response
     )
 
-    try:
+    save_result(
+        result
+    )
 
-        seat_data = fetch_bms_seat_data()
-
-        print()
-        print("=" * 70)
-        print("RESULT")
-        print("=" * 70)
-
-        print(
-            "Potential seats:",
-            seat_data["potential"]
-        )
-
-        print(
-            "Available:",
-            seat_data["available"]
-        )
-
-        print(
-            "Booked:",
-            seat_data["booked"]
-        )
-
-        print(
-            "Selected:",
-            seat_data["selected"]
-        )
-
-        print(
-            "Other:",
-            seat_data["other"]
-        )
-
-        save_to_google_sheet(
-            seat_data
-        )
-
-        print()
-        print(
-            "SUCCESS"
-        )
-
-    except Exception as e:
-
-        print()
-        print(
-            "TRACKER ERROR:"
-        )
-
-        print(
-            repr(e)
-        )
-
-        raise
+    print()
+    print("=" * 70)
+    print("TEST FINISHED")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
