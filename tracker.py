@@ -6,6 +6,7 @@ from curl_cffi import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
+# --- CONFIGURATION ---
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 SHEET_TAB_NAME = "HourlyLog"
 
@@ -31,7 +32,7 @@ def parse_tickets(raw_str):
         return 0
 
 def run():
-    print("1. Connecting to Google Sheets...")
+    print("Connecting to Google Sheets...")
     sa_info = json.loads(os.environ["GCP_SA_KEY"])
     creds = Credentials.from_service_account_info(
         sa_info, 
@@ -46,99 +47,104 @@ def run():
         sheet = spreadsheet.add_worksheet(title=SHEET_TAB_NAME, rows=1000, cols=10)
         sheet.append_row([
             "Timestamp (IST)", "Movie Title", "Event Code", 
-            "Tickets Sold (Last 1 Hr)", "Raw Status Text", "Scope"
+            "Language", "Tickets Sold (Last 1 Hr)", "Raw Status Text", "Scope"
         ], value_input_option="USER_ENTERED")
 
-    session = requests.Session(impersonate="safari15_5")
+    session = requests.Session(impersonate="chrome120")
     unique_movies = {}
 
-    print("2. Fetching movie catalogs via BMS App API...")
-    for reg in REGIONS:
-        url = f"https://in.bookmyshow.com/serv/v2/explore/movies?region={reg}"
+    print("1. Fetching active movies across India...")
+    for region in REGIONS:
         headers = {
             "Accept": "application/json, text/plain, */*",
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
-            "x-bms-platform": "MOBWEB",
-            "x-region-code": reg
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "x-bms-platform": "WEB",
+            "x-region-code": region
         }
         
+        url = f"https://in.bookmyshow.com/api/explore/v1/discover/movies?regionCode={region}"
         try:
             res = session.get(url, headers=headers, timeout=12)
-            print(f"[{reg}] Response HTTP {res.status_code}")
-            
             if res.status_code == 200:
                 data = res.json()
-                # Parse all variations of movie catalog payloads
-                movies_arr = (
-                    data.get("movies", []) or 
-                    data.get("explore", {}).get("movies", []) or 
-                    data.get("data", {}).get("movies", []) or 
-                    data.get("cards", [])
+                cards = (
+                    data.get("explore", {}).get("cards", []) or 
+                    data.get("cards", []) or 
+                    data.get("movies", [])
                 )
-                
-                for item in movies_arr:
-                    code = item.get("code") or item.get("eventCode") or item.get("EventCode")
-                    title = item.get("name") or item.get("title") or item.get("EventTitle")
+                for card in cards:
+                    code = card.get("eventCode") or card.get("code") or card.get("event_code")
+                    title = card.get("title") or card.get("name") or card.get("event_name")
+                    lang = card.get("language") or card.get("lang") or ""
                     if code and title and code not in unique_movies:
                         unique_movies[code] = {
                             "title": title,
-                            "code": code,
-                            "region": reg
+                            "language": lang,
+                            "region": region
                         }
         except Exception as e:
-            print(f"Error for {reg}: {e}")
+            print(f"Failed checking {region}: {e}")
 
-    print(f"\nTotal unique movies found: {len(unique_movies)}")
-
-    # Fallback to direct explore catalog if mobile payload is restricted
-    if len(unique_movies) == 0:
-        print("Running public catalog fallback...")
-        fallback_url = "https://in.bookmyshow.com/serv/v2/explore/movies"
-        try:
-            fb_res = session.get(fallback_url, timeout=10)
-            if fb_res.status_code == 200:
-                for item in fb_res.json().get("movies", []):
-                    code = item.get("code") or item.get("eventCode")
-                    title = item.get("name") or item.get("title")
-                    if code and title:
-                        unique_movies[code] = {"title": title, "code": code, "region": "MUMBAI"}
-        except Exception as e:
-            print(f"Fallback error: {e}")
+    print(f"Total unique movies found: {len(unique_movies)}")
 
     now_ist = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:00:00")
     rows_to_append = []
 
-    print("3. Fetching booking velocity badges...")
+    print("2. Querying booking velocity per movie...")
     for code, meta in unique_movies.items():
-        movie_url = f"https://in.bookmyshow.com/serv/v2/movies/{code}"
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "x-bms-platform": "WEB",
+            "x-region-code": meta.get("region", "MUMBAI")
+        }
+        
+        movie_url = f"https://in.bookmyshow.com/api/explore/v1/movies/{code}"
         tickets = 0
-        raw_text = "No Velocity Badge"
+        raw_text = "No Trending Badge"
 
         try:
-            m_res = session.get(movie_url, timeout=10)
+            m_res = session.get(movie_url, headers=headers, timeout=10)
             if m_res.status_code == 200:
-                details = m_res.json().get("movieDetails", {}) or m_res.json().get("data", {})
-                raw_text = (
+                m_json = m_res.json()
+                details = m_json.get("movieDetails", {}) or m_json.get("data", {})
+                
+                # Check all known keys where BMS stores the trending ticket counter
+                analytics_label = (
                     details.get("bookingVelocity", {}).get("label") or
                     details.get("recentBookings", {}).get("text") or
-                    details.get("trendingCount") or ""
+                    details.get("trendingCount") or
+                    details.get("analytics", {}).get("bookingVelocity") or
+                    ""
                 )
-                tickets = parse_tickets(raw_text)
+                
+                if analytics_label:
+                    raw_text = str(analytics_label)
+                    tickets = parse_tickets(raw_text)
+                else:
+                    # Check text inside general badges/tags
+                    tags = details.get("tags", [])
+                    for tag in tags:
+                        if isinstance(tag, str) and ("bought" in tag.lower() or "booked" in tag.lower()):
+                            raw_text = tag
+                            tickets = parse_tickets(tag)
+                            break
         except Exception as e:
             print(f"Error checking {meta['title']}: {e}")
 
         rows_to_append.append([
-            now_ist, meta["title"], code, tickets, raw_text, "All India"
+            now_ist, meta["title"], code, meta["language"], tickets, raw_text, "All India"
         ])
         print(f"-> {meta['title']}: {tickets} tickets ({raw_text})")
 
-    # 4. Push to Google Sheets
+    # 3. Write rows to Google Sheet
+    print(f"\nPreparing to write {len(rows_to_append)} rows to Google Sheets...")
     if rows_to_append:
-        print(f"\nPushing {len(rows_to_append)} rows to Google Sheet...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        print("Success! Google Sheet updated.")
+        print("Done! Data written to Google Sheet successfully.")
     else:
-        print("No movie rows generated.")
+        print("No rows generated.")
 
 if __name__ == "__main__":
     run()
