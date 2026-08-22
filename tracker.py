@@ -9,8 +9,9 @@ from google.oauth2.service_account import Credentials
 SPREADSHEET_ID = "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 SHEET_TAB_NAME = "Palldium_26Aug"
 TARGET_DATE = "2026-08-26"
-VENUE_CODE = "PALL"  # BMS Venue Code for PVR ICON Phoenix Palladium Lower Parel
-TARGET_MOVIE = "TOXIC"
+CITY_NAME = "mumbai"
+CINEMA_KEYWORD = "Palladium"
+TARGET_MOVIE = "Toxic"
 
 def calculate_occupancy(booked, total):
     if total == 0:
@@ -43,113 +44,99 @@ def run():
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
-        "x-bms-platform": "WEB",
-        "x-region-code": "MUMBAI"
+        "client": "web"
     }
 
-    date_clean = TARGET_DATE.replace("-", "")
-    print(f"2. Fetching advance shows for {TARGET_MOVIE} at Palladium on {TARGET_DATE}...")
-
-    # Query public showtime API for Palladium Mumbai
-    url = f"https://in.bookmyshow.com/api/explore/v1/shows/by-venue?venueCode={VENUE_CODE}&date={date_clean}"
     rows_to_append = []
 
+    print(f"2. Fetching showtimes from Paytm/District for {CITY_NAME} on {TARGET_DATE}...")
+    
+    # 1. Query city movies & cinema showtimes
+    catalog_url = f"https://apiproxy.paytm.com/v2/movies/shows?city={CITY_NAME}&date={TARGET_DATE}"
+    
     try:
-        res = session.get(url, headers=headers, timeout=15)
+        res = session.get(catalog_url, headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            events = data.get("events", []) or data.get("data", {}).get("events", [])
+            cinemas = data.get("cinemas", []) or data.get("data", {}).get("cinemas", [])
+            movies_dict = {m["id"]: m.get("name", "") for m in data.get("movies", []) if "id" in m}
 
-            for event in events:
-                movie_title = event.get("title") or event.get("name", "")
-                
-                # Check for target movie match (or include all if Toxic is listed under sub-titles)
-                lang_format = f"{event.get('dimension', '')} {event.get('language', '')}".strip()
-                shows = event.get("shows", []) or event.get("showTimes", [])
+            # Filter for PVR ICON Phoenix Palladium
+            target_cinemas = [c for c in cinemas if CINEMA_KEYWORD.lower() in c.get("name", "").lower()]
+            
+            if not target_cinemas:
+                # If specific date isn't listed yet, check all Palladium shows
+                target_cinemas = cinemas
 
-                for show in shows:
-                    session_id = show.get("sessionId") or show.get("showId")
-                    show_time = show.get("showTime") or show.get("time", "")
-                    audi = show.get("screenName") or show.get("audi", "Audi")
+            for cinema in target_cinemas:
+                cinema_name = cinema.get("name", "PVR ICON Palladium")
+                if CINEMA_KEYWORD.lower() not in cinema_name.lower():
+                    continue
+
+                for show in cinema.get("shows", []):
+                    movie_id = show.get("movie_id") or show.get("movieId")
+                    movie_name = movies_dict.get(movie_id, show.get("movie_name", "Toxic"))
+                    
+                    # Filter for Toxic (case-insensitive)
+                    if TARGET_MOVIE.lower() not in movie_name.lower():
+                        continue
+
+                    session_id = show.get("session_id") or show.get("id")
+                    show_time = show.get("show_time") or show.get("time", "")
+                    format_lang = f"{show.get('screen_format', '')} {show.get('language', '')}".strip()
+                    audi = show.get("audi_name", "Audi")
 
                     total_seats = 0
                     booked_seats = 0
 
-                    # 1. Parse categories inventory
-                    categories = show.get("categories", [])
-                    if categories:
-                        for cat in categories:
-                            cap = int(cat.get("capacity", 0) or cat.get("total", 0))
-                            avail = int(cat.get("available", 0) or cat.get("curAvail", 0))
-                            total_seats += cap
-                            booked_seats += max(0, cap - avail)
-
-                    # 2. Detailed seat-grid fallback if category summary isn't present
-                    if total_seats == 0 and session_id:
-                        s_url = f"https://in.bookmyshow.com/api/explore/v1/seats?sessionId={session_id}"
+                    # 2. Extract seat inventory layout
+                    if session_id:
+                        seat_url = f"https://apiproxy.paytm.com/v3/movies/seats?session_id={session_id}&city={CITY_NAME}"
                         try:
-                            s_res = session.get(s_url, headers=headers, timeout=8)
+                            s_res = session.get(seat_url, headers=headers, timeout=8)
                             if s_res.status_code == 200:
-                                s_data = s_res.json()
-                                seats = s_data.get("seatLayout", {}).get("seats", [])
-                                total_seats = len(seats)
-                                booked_seats = sum(1 for s in seats if str(s.get("status", "")).lower() in ["booked", "sold", "unavailable", "1"])
+                                s_json = s_res.json()
+                                # Calculate available vs occupied seats
+                                for row in s_json.get("seatLayout", {}).get("rows", []):
+                                    for seat in row.get("seats", []):
+                                        if seat.get("type", "").lower() != "space":
+                                            total_seats += 1
+                                            if seat.get("status", "").lower() in ["booked", "occupied", "unavailable", "sold"]:
+                                                booked_seats += 1
                         except Exception as e:
-                            print(f"Error checking layout for {session_id}: {e}")
+                            print(f"Error reading seat layout: {e}")
+
+                    # Fallback to category level numbers if layout is blocked
+                    if total_seats == 0 and "areas" in show:
+                        for area in show.get("areas", []):
+                            tot = int(area.get("total_seats", 0))
+                            avail = int(area.get("avail_seats", 0))
+                            total_seats += tot
+                            booked_seats += max(0, tot - avail)
 
                     avail_seats = max(0, total_seats - booked_seats)
                     occ_pct = calculate_occupancy(booked_seats, total_seats)
 
                     rows_to_append.append([
-                        now_ist,
-                        TARGET_DATE,
-                        "PVR ICON Palladium Lower Parel",
-                        movie_title,
-                        lang_format,
-                        audi,
-                        show_time,
-                        total_seats,
-                        booked_seats,
-                        avail_seats,
-                        occ_pct
+                        now_ist, TARGET_DATE, cinema_name, movie_name,
+                        format_lang, audi, show_time, total_seats,
+                        booked_seats, avail_seats, occ_pct
                     ])
-                    print(f"-> {movie_title} [{lang_format}] ({show_time}) | Booked: {booked_seats}/{total_seats} ({occ_pct})")
+                    print(f"-> {movie_name} ({show_time}) | Booked: {booked_seats}/{total_seats} ({occ_pct})")
 
         else:
-            print(f"BMS returned status code: {res.status_code}")
+            print(f"Paytm API returned status: {res.status_code}")
 
     except Exception as e:
-        print(f"Error querying schedule: {e}")
-
-    # Fallback to direct PVR chain endpoint if BMS venue grid is currently caching
-    if len(rows_to_append) == 0:
-        print("Checking PVR direct API for advance shows...")
-        pvr_url = f"https://api.pvrcinemas.com/shows/v1/venue/{VENUE_CODE}?date={TARGET_DATE}"
-        try:
-            pvr_res = session.get(pvr_url, timeout=10)
-            if pvr_res.status_code == 200:
-                pvr_data = pvr_res.json()
-                for s in pvr_data.get("shows", []):
-                    title = s.get("movieName", "Toxic")
-                    s_time = s.get("showTime", "")
-                    t_seats = int(s.get("totalSeats", 0))
-                    b_seats = int(s.get("bookedSeats", 0))
-                    a_seats = max(0, t_seats - b_seats)
-                    rows_to_append.append([
-                        now_ist, TARGET_DATE, "PVR ICON Palladium Lower Parel",
-                        title, s.get("format", ""), s.get("audi", ""), s_time,
-                        t_seats, b_seats, a_seats, calculate_occupancy(b_seats, t_seats)
-                    ])
-        except Exception as e:
-            print(f"PVR direct error: {e}")
+        print(f"Error querying Paytm/District: {e}")
 
     # 3. Write rows to Google Sheets
     if rows_to_append:
-        print(f"\n3. Writing {len(rows_to_append)} rows to '{SHEET_TAB_NAME}'...")
+        print(f"\n3. Writing {len(rows_to_append)} rows to Google Sheet...")
         sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED")
         print("Success! Google Sheet tab updated.")
     else:
-        print("No shows currently found for the requested date.")
+        print("No active show sessions found for the specified date and movie.")
 
 if __name__ == "__main__":
     run()
