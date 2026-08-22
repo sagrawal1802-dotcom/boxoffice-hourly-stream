@@ -7,9 +7,11 @@ on:
 
 jobs:
   run-stream:
+
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -25,11 +27,12 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
 
-      - name: Execute Existing Stream Script
+      - name: Execute BMS Tracker
         env:
           SPREADSHEET_ID: "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
           PROXY_URL: ${{ secrets.PROXY_URL }}
           GCP_SA_KEY_B64: ${{ secrets.GCP_SA_KEY_B64 }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+
         run: |
           python tracker.py
