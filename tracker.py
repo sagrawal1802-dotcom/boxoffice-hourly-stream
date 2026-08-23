@@ -1,175 +1,213 @@
-import json
 import re
+import json
 import time
+from datetime import datetime
+
 from playwright.sync_api import sync_playwright
 
 
-CITY = "mumbai"
-REGION_CODE = "MUMBAI"
-DATE_CODE = "20260826"
-
-EVENT_CODES = [
-    "ET00379311",
-    "ET00513458",
-    "ET00513506",
-]
-
-API_URL = (
-    "https://in.bookmyshow.com/api/movies-data/"
-    "v5/showtimes-by-event/primary-dynamic"
-)
+BMS_URL = "https://in.bookmyshow.com/cinemas-list/cinepolis/mumbai/cnpl"
 
 
-def header(title):
+def clean_text(text):
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_cinepolis_properties(page):
     print("\n" + "=" * 90)
-    print(title)
+    print("BMS MUMBAI CINEPOLIS PROPERTY DISCOVERY")
+    print("=" * 90)
+    print(f"URL: {BMS_URL}")
     print("=" * 90)
 
+    responses = []
 
-def clean(value):
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    def on_response(response):
+        url = response.url.lower()
 
+        if "bookmyshow.com" in url:
+            if any(x in url for x in [
+                "cinema",
+                "venue",
+                "showtime",
+                "api"
+            ]):
+                responses.append({
+                    "status": response.status,
+                    "type": response.request.resource_type,
+                    "url": response.url
+                })
 
-def find_strings(obj, keyword="cinepolis"):
-    """
-    Recursively search a JSON object and return dictionaries
-    containing the requested keyword somewhere in their values.
-    """
-    results = []
+    page.on("response", on_response)
 
-    if isinstance(obj, dict):
-        text = json.dumps(
-            obj,
-            ensure_ascii=False
-        ).lower()
+    print("\nOpening BMS Cinepolis Mumbai page...")
 
-        if keyword.lower() in text:
-            results.append(obj)
+    response = page.goto(
+        BMS_URL,
+        wait_until="domcontentloaded",
+        timeout=60000
+    )
 
-        for value in obj.values():
-            results.extend(
-                find_strings(value, keyword)
-            )
+    if response:
+        print("HTTP status:", response.status)
+    else:
+        print("No main response received.")
 
-    elif isinstance(obj, list):
-        for item in obj:
-            results.extend(
-                find_strings(item, keyword)
-            )
+    print("Waiting for BMS page data...")
+    time.sleep(8)
 
-    return results
+    # Scroll several times because BMS may lazy-load cinema entries.
+    for i in range(8):
+        page.mouse.wheel(0, 3000)
+        time.sleep(1)
 
+    html = page.content()
 
-def extract_possible_venue_info(obj):
-    """
-    Recursively inspect dictionaries for venue/cinema fields.
-    """
-    found = []
+    print("\n" + "=" * 90)
+    print("PAGE ANALYSIS")
+    print("=" * 90)
 
-    if isinstance(obj, dict):
+    print("HTML size:", len(html))
+    print("Page title:", page.title())
 
-        keys_lower = {
-            str(k).lower(): k
-            for k in obj.keys()
-        }
+    properties = []
 
-        name = None
-        venue_code = None
-        city = None
+    # ------------------------------------------------------------------
+    # Strategy 1:
+    # Extract visible text around Cinepolis listings.
+    # ------------------------------------------------------------------
 
-        name_keys = [
-            "venuename",
-            "venue_name",
-            "cinemaname",
-            "cinema_name",
-            "name",
-            "displayname",
-            "display_name",
-        ]
+    body_text = page.locator("body").inner_text(timeout=15000)
 
-        code_keys = [
-            "venuecode",
-            "venue_code",
-            "cinemacode",
-            "cinema_code",
-        ]
+    lines = [
+        clean_text(x)
+        for x in body_text.splitlines()
+        if clean_text(x)
+    ]
 
-        city_keys = [
-            "city",
-            "cityname",
-            "city_name",
-        ]
+    # Known BMS presentation:
+    #
+    # Cinepolis: Property Name
+    # Address
+    #
+    # Capture a Cinepolis line and the following address line.
+    for i, line in enumerate(lines):
 
-        for key in name_keys:
-            if key in keys_lower:
-                value = obj.get(keys_lower[key])
+        if "cinepolis:" not in line.lower():
+            continue
 
-                if isinstance(value, str):
-                    name = clean(value)
+        name = line
 
-                    if name:
-                        break
+        address = ""
 
-        for key in code_keys:
-            if key in keys_lower:
-                value = obj.get(keys_lower[key])
+        if i + 1 < len(lines):
+            possible_address = lines[i + 1]
 
-                if isinstance(value, (str, int)):
-                    venue_code = str(value).strip()
+            # Don't accidentally use another heading.
+            if (
+                "cinepolis" not in possible_address.lower()
+                and "cinema in" not in possible_address.lower()
+                and "home" not in possible_address.lower()
+            ):
+                address = possible_address
 
-                    if venue_code:
-                        break
+        properties.append({
+            "name": name,
+            "address": address
+        })
 
-        for key in city_keys:
-            if key in keys_lower:
-                value = obj.get(keys_lower[key])
+    # ------------------------------------------------------------------
+    # Strategy 2:
+    # Search HTML text directly for Cinepolis names if DOM extraction
+    # missed anything.
+    # ------------------------------------------------------------------
 
-                if isinstance(value, str):
-                    city = clean(value)
+    for match in re.finditer(
+        r"Cinepolis\s*:\s*([^<\n]+)",
+        html,
+        flags=re.IGNORECASE
+    ):
+        name = clean_text(match.group(0))
 
-                    if city:
-                        break
-
-        if name and "cinepolis" in name.lower():
-
-            found.append({
-                "venue_name": name,
-                "venue_code": venue_code or "",
-                "city": city or "",
+        if name:
+            properties.append({
+                "name": name,
+                "address": ""
             })
 
-        for value in obj.values():
-            found.extend(
-                extract_possible_venue_info(value)
-            )
+    # ------------------------------------------------------------------
+    # Deduplicate
+    # ------------------------------------------------------------------
 
-    elif isinstance(obj, list):
+    unique = {}
 
-        for item in obj:
-            found.extend(
-                extract_possible_venue_info(item)
-            )
+    for item in properties:
+        key = clean_text(item["name"]).lower()
 
-    return found
+        if not key:
+            continue
+
+        if key not in unique:
+            unique[key] = item
+        else:
+            if not unique[key]["address"] and item["address"]:
+                unique[key]["address"] = item["address"]
+
+    properties = list(unique.values())
+
+    # ------------------------------------------------------------------
+    # Print result
+    # ------------------------------------------------------------------
+
+    print("\n" + "=" * 90)
+    print("CINEPOLIS PROPERTIES FOUND")
+    print("=" * 90)
+
+    if not properties:
+        print("NO CINEPOLIS PROPERTIES FOUND.")
+    else:
+        for i, item in enumerate(properties, 1):
+            print(f"\n{i}. {item['name']}")
+
+            if item["address"]:
+                print(f"   Address: {item['address']}")
+
+    print("\n" + "=" * 90)
+    print("TOTAL CINEPOLIS PROPERTIES:", len(properties))
+    print("=" * 90)
+
+    # ------------------------------------------------------------------
+    # Save JSON
+    # ------------------------------------------------------------------
+
+    output = {
+        "timestamp": datetime.now().isoformat(),
+        "source": BMS_URL,
+        "city": "Mumbai",
+        "chain": "Cinepolis",
+        "properties": properties,
+        "captured_responses": responses
+    }
+
+    with open(
+        "cinepolis_mumbai_properties.json",
+        "w",
+        encoding="utf-8"
+    ) as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+    print("\nSaved: cinepolis_mumbai_properties.json")
+
+    return properties
 
 
 def main():
 
-    header(
-        "BMS TOXIC - MUMBAI CINEPOLIS PROPERTY DISCOVERY"
-    )
-
-    print("City       :", CITY)
-    print("Region     :", REGION_CODE)
-    print("Date       :", DATE_CODE)
-    print("Event codes:", ", ".join(EVENT_CODES))
-    print("Mode       : DISCOVERY ONLY")
-    print()
-    print("NO GOOGLE SHEETS")
-    print("NO SEAT API")
-    print("NO SEAT PARSING")
-
-    all_venues = {}
+    print("\n" + "=" * 90)
+    print("BMS TOXIC PROJECT - CINEPOLIS PROPERTY DISCOVERY")
+    print("=" * 90)
 
     with sync_playwright() as p:
 
@@ -177,343 +215,37 @@ def main():
             headless=True,
             args=[
                 "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
                 "--no-sandbox",
-            ],
+                "--disable-dev-shm-usage"
+            ]
         )
 
         context = browser.new_context(
             viewport={
-                "width": 1366,
-                "height": 768,
+                "width": 1440,
+                "height": 1000
             },
             locale="en-IN",
             timezone_id="Asia/Kolkata",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            )
         )
 
         page = context.new_page()
 
-        # First open BMS to establish browser context/cookies.
         try:
-
-            print()
-            print("Opening BMS...")
-
-            response = page.goto(
-                "https://in.bookmyshow.com/",
-                wait_until="domcontentloaded",
-                timeout=60000,
-            )
-
-            if response:
-                print(
-                    "BMS homepage status:",
-                    response.status
-                )
-
-        except Exception as e:
-
-            print(
-                "BMS homepage navigation warning:",
-                e
-            )
-
-        page.wait_for_timeout(3000)
-
-        for event_code in EVENT_CODES:
-
-            header(
-                f"REQUESTING SHOWTIME DATA - {event_code}"
-            )
-
-            params = {
-                "etCodes": "*",
-                "dateCode": DATE_CODE,
-                "isDesktop": "true",
-                "regionCode": REGION_CODE,
-                "xLocationShared": "false",
-                "memberId": "",
-                "lsId": "",
-                "subCode": "",
-                "appCode": "WEB",
-                "language": "hindi",
-                "refEventCode": event_code,
-            }
-
-            response_data = None
-
-            for attempt in range(1, 4):
-
-                print(
-                    f"Attempt {attempt}/3"
-                )
-
-                try:
-
-                    result = page.request.get(
-                        API_URL,
-                        params=params,
-                        headers={
-                            "accept": "application/json, text/plain, */*",
-                            "referer": (
-                                "https://in.bookmyshow.com/"
-                            ),
-                            "origin": (
-                                "https://in.bookmyshow.com"
-                            ),
-                        },
-                        timeout=60000,
-                    )
-
-                    print(
-                        "HTTP status:",
-                        result.status
-                    )
-
-                    body = result.text()
-
-                    print(
-                        "Response size:",
-                        len(body)
-                    )
-
-                    if result.status == 200:
-
-                        try:
-
-                            response_data = json.loads(
-                                body
-                            )
-
-                            print(
-                                "JSON successfully decoded."
-                            )
-
-                            break
-
-                        except Exception as e:
-
-                            print(
-                                "JSON decode error:",
-                                e
-                            )
-
-                    else:
-
-                        print(
-                            "Response preview:",
-                            body[:200].replace(
-                                "\n",
-                                " "
-                            )
-                        )
-
-                except Exception as e:
-
-                    print(
-                        "Request error:",
-                        e
-                    )
-
-                if attempt < 3:
-                    time.sleep(2)
-
-            if response_data is None:
-
-                print(
-                    "NO SHOWTIME DATA FOR",
-                    event_code
-                )
-
-                continue
-
-            # ----------------------------------------------------
-            # Search specifically for Cinepolis
-            # ----------------------------------------------------
-
-            cinepolis_blocks = find_strings(
-                response_data,
-                "cinepolis"
-            )
-
-            print(
-                "JSON blocks containing Cinepolis:",
-                len(cinepolis_blocks)
-            )
-
-            # ----------------------------------------------------
-            # Recursively extract venue information
-            # ----------------------------------------------------
-
-            venues = extract_possible_venue_info(
-                response_data
-            )
-
-            print(
-                "Possible Cinepolis venue records:",
-                len(venues)
-            )
-
-            for venue in venues:
-
-                name = clean(
-                    venue.get("venue_name")
-                )
-
-                code = clean(
-                    venue.get("venue_code")
-                )
-
-                city = clean(
-                    venue.get("city")
-                )
-
-                if not name:
-                    continue
-
-                key = (
-                    name.lower(),
-                    code.upper(),
-                )
-
-                if key not in all_venues:
-
-                    all_venues[key] = {
-                        "venue_name": name,
-                        "venue_code": code,
-                        "city": city,
-                        "event_codes": [event_code],
-                    }
-
-                else:
-
-                    existing = all_venues[key]
-
-                    if event_code not in existing[
-                        "event_codes"
-                    ]:
-                        existing[
-                            "event_codes"
-                        ].append(event_code)
-
-            # ----------------------------------------------------
-            # Print raw Cinepolis-containing blocks for debugging
-            # ----------------------------------------------------
-
-            if cinepolis_blocks:
-
-                print()
-                print(
-                    "CINEPOLIS REFERENCES FOUND"
-                )
-
-                for i, block in enumerate(
-                    cinepolis_blocks[:10],
-                    start=1
-                ):
-
-                    try:
-
-                        text = json.dumps(
-                            block,
-                            ensure_ascii=False
-                        )
-
-                        print(
-                            f"\n--- Block {i} ---"
-                        )
-
-                        print(
-                            text[:3000]
-                        )
-
-                    except Exception:
-                        pass
-
-        browser.close()
-
-    # ============================================================
-    # FINAL RESULT
-    # ============================================================
-
-    header(
-        "CINEPOLIS PROPERTIES FOUND IN MUMBAI"
-    )
-
-    if not all_venues:
-
-        print(
-            "NO CINEPOLIS VENUE RECORDS WERE EXTRACTED."
-        )
-
-        print()
-        print(
-            "This means the JSON structure needs to be inspected "
-            "before building the show scraper."
-        )
-
-    else:
-
-        sorted_venues = sorted(
-            all_venues.values(),
-            key=lambda x: (
-                x["venue_name"].lower(),
-                x["venue_code"].lower(),
-            ),
-        )
-
-        for index, venue in enumerate(
-            sorted_venues,
-            start=1
-        ):
-
-            print(
-                f"\n{index}. {venue['venue_name']}"
-            )
-
-            print(
-                "   Venue Code :",
-                venue["venue_code"] or "(not found)"
-            )
-
-            print(
-                "   City       :",
-                venue["city"] or "(not found)"
-            )
-
-            print(
-                "   Event Codes:",
-                ", ".join(
-                    venue["event_codes"]
-                )
-            )
-
-        print()
-        print(
-            "TOTAL CINEPOLIS PROPERTIES:",
-            len(sorted_venues)
-        )
-
-        with open(
-            "cinepolis_mumbai_venues.json",
-            "w",
-            encoding="utf-8",
-        ) as f:
-
-            json.dump(
-                sorted_venues,
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
-
-        print(
-            "Saved: cinepolis_mumbai_venues.json"
-        )
-
-    header(
-        "CINEPOLIS DISCOVERY RUN COMPLETED"
-    )
+            properties = extract_cinepolis_properties(page)
+
+            print("\n" + "=" * 90)
+            print("DISCOVERY COMPLETED")
+            print("=" * 90)
+            print("Properties found:", len(properties))
+
+        finally:
+            browser.close()
 
 
 if __name__ == "__main__":
