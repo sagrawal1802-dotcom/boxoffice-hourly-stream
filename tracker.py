@@ -1,221 +1,383 @@
 import os
-import re
 import json
+import base64
+import re
 import time
 from datetime import datetime
 
+import pytz
+from curl_cffi import requests
 import gspread
 from google.oauth2.service_account import Credentials
-from curl_cffi import requests
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
-
-MOVIE_NAME = "Toxic: A Fairy Tale for Grown-ups"
-
-CITY = "mumbai"
-REGION_CODE = "MUMBAI"
-DATE_CODE = "20260826"
-
-VENUE_CODE = "CSWO"
-VENUE_NAME = "Cinepolis: Nexus Seawoods, Nerul, Navi Mumbai"
 
 SPREADSHEET_ID = os.environ.get(
     "SPREADSHEET_ID",
     "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 )
 
-SHEET_NAME = "Toxic_CSWO"
+SHEET_TAB_NAME = "Toxic_CSWO"
 
-# Event code used by BMS as the reference event.
-REFERENCE_EVENT = "ET00513506"
+CITY = "mumbai"
+VENUE_CODE = "CSWO"
+SHOW_DATE = "20260826"
+
+MOVIE_NAME = "Toxic: A Fairy Tale for Grown-ups"
+
+# Delay between BMS seat-layout requests.
+# Keep this reasonably slow.
+DELAY_BETWEEN_SHOWS = 8
+
+# Number of attempts for each seat layout
+MAX_ATTEMPTS = 3
+
+# Google Sheets batch size
+GOOGLE_BATCH_SIZE = 500
 
 
 # ============================================================
-# BMS ENDPOINTS
+# ALL 23 CSWO SHOWS
+#
+# Discovered from BMS showtime data.
+#
+# 14 Hindi 2D
+# 5 IMAX
+# 4 4DX
 # ============================================================
 
-SHOWTIME_URL = (
-    "https://in.bookmyshow.com/api/movies-data/v5/"
-    "showtimes-by-event/primary-dynamic"
+SHOWS = [
+
+    # --------------------------------------------------------
+    # Hindi 2D
+    # Event: ET00379311
+    # --------------------------------------------------------
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "01:05 PM",
+        "event_code": "ET00379311",
+        "session_id": "16073",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "02:45 PM",
+        "event_code": "ET00379311",
+        "session_id": "15927",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "03:45 PM",
+        "event_code": "ET00379311",
+        "session_id": "15932",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "05:10 PM",
+        "event_code": "ET00379311",
+        "session_id": "16074",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "06:50 PM",
+        "event_code": "ET00379311",
+        "session_id": "15928",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "07:00 AM",
+        "event_code": "ET00379311",
+        "session_id": "15925",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "07:50 PM",
+        "event_code": "ET00379311",
+        "session_id": "15931",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "08:00 AM",
+        "event_code": "ET00379311",
+        "session_id": "15934",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "09:00 AM",
+        "event_code": "ET00379311",
+        "session_id": "16072",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "09:15 PM",
+        "event_code": "ET00379311",
+        "session_id": "16075",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "10:40 AM",
+        "event_code": "ET00379311",
+        "session_id": "15926",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "10:55 PM",
+        "event_code": "ET00379311",
+        "session_id": "15929",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "11:40 AM",
+        "event_code": "ET00379311",
+        "session_id": "15933",
+    },
+
+    {
+        "format": "Hindi 2D",
+        "show_time": "11:55 PM",
+        "event_code": "ET00379311",
+        "session_id": "15930",
+    },
+
+
+    # --------------------------------------------------------
+    # IMAX
+    # Event: ET00513458
+    # --------------------------------------------------------
+
+    {
+        "format": "IMAX",
+        "show_time": "03:15 PM",
+        "event_code": "ET00513458",
+        "session_id": "16007",
+    },
+
+    {
+        "format": "IMAX",
+        "show_time": "07:20 PM",
+        "event_code": "ET00513458",
+        "session_id": "16008",
+    },
+
+    {
+        "format": "IMAX",
+        "show_time": "07:30 AM",
+        "event_code": "ET00513458",
+        "session_id": "16005",
+    },
+
+    {
+        "format": "IMAX",
+        "show_time": "11:10 AM",
+        "event_code": "ET00513458",
+        "session_id": "16006",
+    },
+
+    {
+        "format": "IMAX",
+        "show_time": "11:25 PM",
+        "event_code": "ET00513458",
+        "session_id": "16009",
+    },
+
+
+    # --------------------------------------------------------
+    # 4DX
+    # Event: ET00513506
+    # --------------------------------------------------------
+
+    {
+        "format": "4DX",
+        "show_time": "03:30 PM",
+        "event_code": "ET00513506",
+        "session_id": "16021",
+    },
+
+    {
+        "format": "4DX",
+        "show_time": "07:35 PM",
+        "event_code": "ET00513506",
+        "session_id": "16024",
+    },
+
+    {
+        "format": "4DX",
+        "show_time": "07:45 AM",
+        "event_code": "ET00513506",
+        "session_id": "16020",
+    },
+
+    {
+        "format": "4DX",
+        "show_time": "11:40 PM",
+        "event_code": "ET00513506",
+        "session_id": "16023",
+    },
+]
+
+
+# ============================================================
+# GOOGLE SHEET HEADERS
+# ============================================================
+
+HEADERS = [
+    "Timestamp IST",
+    "Movie",
+    "Event Code",
+    "Venue Code",
+    "Session ID",
+    "Format",
+    "Show Time",
+    "Date",
+    "City",
+    "Row Number",
+    "Row Name",
+    "Category Code",
+    "Category",
+    "Seat Token",
+    "Seat Code",
+    "Seat Number",
+    "BMS State",
+]
+
+
+# ============================================================
+# GOOGLE CREDENTIALS
+# ============================================================
+
+GCP_SA_KEY = (
+    os.environ.get("GCP_SA_KEY_B64")
+    or os.environ.get("GCP_SA_KEY")
 )
 
-SEATLAYOUT_URL = (
-    "https://in.bookmyshow.com/api/movies-data/"
-    "seatlayout/v1/primary"
-)
-
 
 # ============================================================
-# HEADERS
+# CATEGORY FALLBACK
 # ============================================================
 
-HEADERS = {
-    "accept": "application/json, text/plain, */*",
-    "accept-language": "en-US,en-GB;q=0.9,en;q=0.8",
-    "cache-control": "no-cache",
-    "pragma": "no-cache",
-    "referer": (
-        "https://in.bookmyshow.com/movies/mumbai/"
-        "toxic-a-fairy-tale-for-grown-ups/"
-        f"buytickets/{REFERENCE_EVENT}/{DATE_CODE}"
-        f"?etCodes=*&language=hindi"
-        f"&refEventCode={REFERENCE_EVENT}"
-    ),
-    "sec-ch-ua": (
-        '"Not=A?Brand";v="99", '
-        '"Google Chrome";v="151", '
-        '"Chromium";v="151"'
-    ),
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "user-agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/151.0.0.0 Safari/537.36"
-    ),
-    "x-app-code": "WEB",
-    "x-platform": "WEB",
-    "x-platform-code": "WEB",
-    "x-region-code": REGION_CODE,
-    "x-region-slug": CITY,
-    "x-location-selection": "manual",
-    "x-latitude": "19.076",
-    "x-longitude": "72.8777",
-    "x-geohash": "te7",
+CATEGORY_FALLBACK = {
+    "A": "RECLINER",
+    "B": "PREMIUM",
+    "C": "EXECUTIVE XL",
+    "D": "EXECUTIVE",
+    "E": "NORMAL",
 }
 
 
 # ============================================================
-# SESSION
+# PRINT HELPERS
 # ============================================================
 
-session = requests.Session(
-    impersonate="chrome"
-)
+def banner(title):
+    print()
+    print("=" * 90)
+    print(title)
+    print("=" * 90)
+
+
+def get_ist_timestamp():
+    tz = pytz.timezone("Asia/Kolkata")
+    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ============================================================
 # GOOGLE SHEETS
 # ============================================================
 
-def connect_google_sheet():
+def init_google_sheet():
 
-    print()
-    print("=" * 90)
-    print("CONNECTING TO GOOGLE SHEETS")
-    print("=" * 90)
+    banner("CONNECTING TO GOOGLE SHEETS")
+
+    if not GCP_SA_KEY:
+        raise ValueError(
+            "Missing GCP_SA_KEY_B64 or GCP_SA_KEY GitHub Secret."
+        )
+
+    raw_key = GCP_SA_KEY.strip()
+
+    try:
+
+        if raw_key.startswith("{"):
+            service_account_info = json.loads(raw_key)
+
+        else:
+            decoded = base64.b64decode(raw_key).decode("utf-8")
+            service_account_info = json.loads(decoded)
+
+    except Exception as error:
+
+        raise ValueError(
+            f"Could not decode Google service account secret: {error}"
+        )
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
 
-    credentials = None
-
-    b64_key = os.environ.get("GCP_SA_KEY_B64")
-
-    if b64_key:
-
-        import base64
-
-        try:
-            decoded = base64.b64decode(
-                b64_key
-            ).decode("utf-8")
-
-            service_account_info = json.loads(
-                decoded
-            )
-
-            credentials = (
-                Credentials.from_service_account_info(
-                    service_account_info,
-                    scopes=scopes
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                "Could not decode GCP_SA_KEY_B64:",
-                e
-            )
-
-    if credentials is None:
-
-        raw_key = os.environ.get("GCP_SA_KEY")
-
-        if raw_key:
-
-            try:
-
-                service_account_info = json.loads(
-                    raw_key
-                )
-
-                credentials = (
-                    Credentials.from_service_account_info(
-                        service_account_info,
-                        scopes=scopes
-                    )
-                )
-
-            except Exception as e:
-
-                print(
-                    "Could not load GCP_SA_KEY:",
-                    e
-                )
-
-    if credentials is None:
-
-        if os.path.exists("credentials.json"):
-
-            credentials = (
-                Credentials.from_service_account_file(
-                    "credentials.json",
-                    scopes=scopes
-                )
-            )
-
-        else:
-
-            raise RuntimeError(
-                "No Google credentials found. "
-                "Set GCP_SA_KEY_B64 or GCP_SA_KEY."
-            )
-
-    client = gspread.authorize(
-        credentials
+    credentials = Credentials.from_service_account_info(
+        service_account_info,
+        scopes=scopes
     )
 
-    spreadsheet = client.open_by_key(
-        SPREADSHEET_ID
-    )
+    client = gspread.authorize(credentials)
+
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
 
     try:
 
-        sheet = spreadsheet.worksheet(
-            SHEET_NAME
-        )
+        sheet = spreadsheet.worksheet(SHEET_TAB_NAME)
 
     except gspread.WorksheetNotFound:
 
-        print(
-            f"Creating worksheet: {SHEET_NAME}"
-        )
+        print(f"Creating worksheet: {SHEET_TAB_NAME}")
 
         sheet = spreadsheet.add_worksheet(
-            title=SHEET_NAME,
-            rows=10000,
-            cols=20
+            title=SHEET_TAB_NAME,
+            rows=50000,
+            cols=len(HEADERS)
         )
+
+    existing = sheet.get_all_values()
+
+    if not existing:
+
+        print("Sheet empty. Adding headers.")
+
+        sheet.update(
+            range_name="A1",
+            values=[HEADERS]
+        )
+
+    else:
+
+        current_headers = existing[0]
+
+        if current_headers[:len(HEADERS)] != HEADERS:
+
+            print()
+            print("WARNING: Existing headers differ.")
+            print("Current:")
+            print(current_headers)
+            print()
+            print("Expected:")
+            print(HEADERS)
+            print()
 
     print("Google Sheets connected.")
 
@@ -223,739 +385,551 @@ def connect_google_sheet():
 
 
 # ============================================================
-# SHOWTIME API
+# BMS SEAT LAYOUT REQUEST
+#
+# This is the endpoint used by the previously successful
+# tracker. It returns BookMyShow.strData.
 # ============================================================
 
-def get_showtime_data():
+def get_seat_layout(show):
 
-    print()
-    print("=" * 90)
-    print("REQUESTING BMS SHOWTIME DATA")
-    print("=" * 90)
+    event_code = show["event_code"]
+    session_id = show["session_id"]
+    show_time = show["show_time"]
+    show_format = show["format"]
 
-    params = {
-        "etCodes": "*",
-        "dateCode": DATE_CODE,
-        "isDesktop": "true",
-        "regionCode": REGION_CODE,
-        "xLocationShared": "false",
-        "memberId": "",
-        "lsId": "",
-        "subCode": "",
-        "appCode": "WEB",
-        "language": "hindi",
-        "refEventCode": REFERENCE_EVENT,
+    url = "https://services-in.bookmyshow.com/doTrans.aspx"
+
+    payload = {
+        "strCommand": "GETSEATLAYOUT",
+        "strVenueCode": VENUE_CODE,
+        "strParam1": session_id,
+        "strParam2": "WEB",
+        "strParam5": "Y",
+        "strParam6": "Y",
+        "strParam7": "N",
+        "strFormat": "json",
+    }
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": (
+            "application/x-www-form-urlencoded; charset=UTF-8"
+        ),
+        "Origin": "https://in.bookmyshow.com",
+        "Referer": (
+            f"https://in.bookmyshow.com/movies/"
+            f"{CITY}/seat-layout/"
+            f"{event_code}/{VENUE_CODE}/"
+            f"{session_id}/{SHOW_DATE}"
+        ),
     }
 
     print()
-    print("Endpoint:")
-    print(SHOWTIME_URL)
+    print("-" * 90)
+    print(
+        f"SEAT LAYOUT | {show_format} | "
+        f"{show_time} | Session {session_id}"
+    )
+    print("-" * 90)
 
-    print()
-    print("Parameters:")
-    print(json.dumps(
-        params,
-        indent=2
-    ))
-
-    for attempt in range(1, 4):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
 
         try:
 
-            print()
+            print(f"Attempt {attempt}/{MAX_ATTEMPTS}")
+
+            response = requests.post(
+                url,
+                data=payload,
+                headers=headers,
+                impersonate="chrome120",
+                timeout=30,
+            )
+
+            print(f"HTTP status: {response.status_code}")
+            print(f"Response size: {len(response.content)} bytes")
+
+            if response.status_code != 200:
+
+                print("BMS request failed.")
+
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(4)
+
+                continue
+
+            # ------------------------------------------------
+            # BMS normally returns JSON.
+            # Sometimes the body can have leading whitespace.
+            # ------------------------------------------------
+
+            try:
+
+                data = response.json()
+
+            except Exception:
+
+                text = response.text.strip()
+
+                print("JSON decoding failed.")
+
+                print("Response preview:")
+                print(text[:1000])
+
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(4)
+
+                continue
+
+            bookmyshow = data.get("BookMyShow", {})
+
+            success = bookmyshow.get("blnSuccess")
+
+            print(f"blnSuccess : {success}")
             print(
-                f"Attempt {attempt}/3"
+                f"intException : "
+                f"{bookmyshow.get('intException')}"
             )
 
-            response = session.get(
-                SHOWTIME_URL,
-                params=params,
-                headers=HEADERS,
-                timeout=30
-            )
-
-            print(
-                "HTTP status:",
-                response.status_code
-            )
-
-            print(
-                "Response size:",
-                len(response.content)
-            )
-
-            if response.status_code == 200:
-
-                try:
-
-                    data = response.json()
-
-                    print(
-                        "BMS showtime JSON received."
-                    )
-
-                    return data
-
-                except Exception as e:
-
-                    print(
-                        "JSON parsing failed:",
-                        e
-                    )
-
-            else:
-
+            if bookmyshow.get("strException"):
                 print(
-                    "Response preview:"
+                    f"strException : "
+                    f"{bookmyshow.get('strException')}"
                 )
 
-                print(
-                    response.text[:1000]
-                )
+            str_data = bookmyshow.get("strData")
 
-        except Exception as e:
+            if not str_data:
 
-            print(
-                "Request error:",
-                e
-            )
+                print("No strData returned by BMS.")
 
-        time.sleep(3)
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(4)
+
+                continue
+
+            print(f"strData length : {len(str_data)}")
+
+            return str_data
+
+        except Exception as error:
+
+            print(f"Request error: {repr(error)}")
+
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(4)
 
     return None
 
 
 # ============================================================
-# DISCOVER CSWO SHOWS
+# CATEGORY PARSER
 # ============================================================
 
-def discover_cswo_shows(data):
+def parse_categories(category_section):
+
+    categories = {}
+
+    parts = category_section.split("|")
+
+    for part in parts:
+
+        part = part.strip()
+
+        if not part:
+            continue
+
+        pieces = part.split(":")
+
+        if len(pieces) < 2:
+            continue
+
+        category_name = pieces[0].strip()
+        category_code = pieces[1].strip()
+
+        if category_code:
+            categories[category_code] = category_name
+
+    return categories
+
+
+# ============================================================
+# SEAT TOKEN PARSER
+#
+# Examples:
+#
+# B1048+6  = AVAILABLE
+# B2049+7  = SOLD
+#
+# The first digit of the numeric seat code:
+#
+# 1 = AVAILABLE
+# 2 = SOLD
+# ============================================================
+
+def parse_seat_token(token):
+
+    token = token.strip()
+
+    if not token:
+        return None
+
+    token = token.replace(" ", "")
+
+    match = re.match(
+        r"^([A-Za-z])(\d+)\+(\d+)$",
+        token
+    )
+
+    if not match:
+        return None
+
+    letter = match.group(1).upper()
+
+    numeric_code = match.group(2)
+
+    actual_seat_number = match.group(3)
+
+    seat_code = f"{letter}{numeric_code}"
+
+    # A0+0 / B0+0 etc. are not physical seats.
+    if numeric_code == "0":
+        return None
+
+    if numeric_code.startswith("1"):
+
+        bms_state = "AVAILABLE"
+
+    elif numeric_code.startswith("2"):
+
+        bms_state = "SOLD"
+
+    else:
+
+        return None
+
+    return {
+        "seat_token": token,
+        "seat_code": seat_code,
+        "seat_number": actual_seat_number,
+        "bms_state": bms_state,
+    }
+
+
+# ============================================================
+# PARSE BMS strData
+# ============================================================
+
+def parse_seat_rows(str_data, show):
+
+    event_code = show["event_code"]
+    session_id = show["session_id"]
+    show_time = show["show_time"]
+    show_format = show["format"]
+
+    timestamp = get_ist_timestamp()
+
+    # --------------------------------------------------------
+    # BMS format:
+    #
+    # category section || seat section
+    # --------------------------------------------------------
+
+    sections = str_data.split("||", 1)
+
+    if len(sections) != 2:
+
+        print("ERROR: Could not split BMS strData.")
+
+        print("strData preview:")
+        print(str_data[:2000])
+
+        return []
+
+    category_section = sections[0]
+
+    seat_section = sections[1]
+
+    categories = parse_categories(category_section)
+
+    # --------------------------------------------------------
+    # If category section does not provide useful names,
+    # use known fallback categories.
+    # --------------------------------------------------------
+
+    for code, name in CATEGORY_FALLBACK.items():
+
+        if code not in categories:
+            categories[code] = name
 
     print()
-    print("=" * 90)
-    print("DISCOVERING CSWO SHOWS")
-    print("=" * 90)
+    print("CATEGORY MAP")
 
-    discovered = []
+    for code, name in categories.items():
 
-    if not data:
-        return discovered
+        print(f"{code} -> {name}")
 
-    widgets = (
-        data
-        .get("data", {})
-        .get("showtimeWidgets", [])
-    )
+    print()
 
-    print(
-        "Showtime widgets:",
-        len(widgets)
-    )
+    raw_rows = seat_section.split("|")
 
-    for widget in widgets:
+    results = []
 
-        widget_data = (
-            widget.get("data", [])
+    available_count = 0
+    sold_count = 0
+
+    # --------------------------------------------------------
+    # Process each physical row
+    # --------------------------------------------------------
+
+    for raw_row in raw_rows:
+
+        raw_row = raw_row.strip()
+
+        if not raw_row:
+            continue
+
+        # Expected:
+        #
+        # 1:M:A000:A0+0:A1052+1:A1053+2...
+        #
+        # Split only first 3 colons.
+        row_parts = raw_row.split(":", 3)
+
+        if len(row_parts) < 4:
+            continue
+
+        row_number = row_parts[0].strip()
+
+        row_name = row_parts[1].strip()
+
+        category_code = row_parts[2].strip()
+
+        seat_data = row_parts[3].strip()
+
+        category = categories.get(
+            category_code,
+            category_code
         )
 
-        for level1 in widget_data:
+        # Seats are separated by :
+        seat_tokens = seat_data.split(":")
 
-            if not isinstance(
-                level1,
-                dict
-            ):
+        for token in seat_tokens:
+
+            token = token.strip()
+
+            if not token:
                 continue
 
-            for level2 in level1.get(
-                "data",
-                []
-            ):
+            parsed = parse_seat_token(token)
 
-                if not isinstance(
-                    level2,
-                    dict
-                ):
-                    continue
+            if parsed is None:
+                continue
 
-                additional = level2.get(
-                    "additionalData",
-                    {}
-                )
+            bms_state = parsed["bms_state"]
 
-                venue_code = additional.get(
-                    "venueCode"
-                )
+            if bms_state == "AVAILABLE":
 
-                if venue_code != VENUE_CODE:
-                    continue
+                available_count += 1
 
-                venue_name = additional.get(
-                    "venueName",
-                    VENUE_NAME
-                )
+            elif bms_state == "SOLD":
 
-                sections = level2.get(
-                    "showtimesSections",
-                    []
-                )
+                sold_count += 1
 
-                for section in sections:
-
-                    section_text = ""
-
-                    try:
-
-                        section_text = (
-                            section
-                            .get("text", [])[0]
-                            .get("components", [])[0]
-                            .get("text", "")
-                        )
-
-                    except Exception:
-                        pass
-
-                    section_format = (
-                        section_text
-                    )
-
-                    section_event_code = (
-                        section
-                        .get("additionalData", {})
-                        .get(
-                            "eventCode"
-                        )
-                    )
-
-                    for show in section.get(
-                        "showtimes",
-                        []
-                    ):
-
-                        show_data = show.get(
-                            "additionalData",
-                            {}
-                        )
-
-                        cta = show.get(
-                            "cta",
-                            {}
-                        )
-
-                        analytics = cta.get(
-                            "analytics",
-                            {}
-                        )
-
-                        session_id = (
-                            show_data.get(
-                                "sessionId"
-                            )
-                        )
-
-                        show_time = (
-                            show_data.get(
-                                "showTime"
-                            )
-                            or show.get(
-                                "title"
-                            )
-                        )
-
-                        show_time_code = (
-                            show_data.get(
-                                "showTimeCode"
-                            )
-                        )
-
-                        show_date_time = (
-                            show_data.get(
-                                "showDateTime"
-                            )
-                        )
-
-                        event_code = (
-                            section_event_code
-                            or show_data.get(
-                                "eventCode"
-                            )
-                            or analytics.get(
-                                "eventCode"
-                            )
-                        )
-
-                        fmt = (
-                            analytics.get(
-                                "format"
-                            )
-                            or show_data.get(
-                                "attributes"
-                            )
-                            or section_format
-                        )
-
-                        record = {
-                            "movie": MOVIE_NAME,
-                            "city": CITY,
-                            "venue_code": VENUE_CODE,
-                            "venue_name": venue_name,
-                            "date": DATE_CODE,
-                            "event_code": event_code,
-                            "format": fmt,
-                            "section": section_format,
-                            "session_id": str(
-                                session_id
-                            ) if session_id else "",
-                            "show_time": show_time,
-                            "show_time_code": (
-                                show_time_code
-                                or ""
-                            ),
-                            "show_date_time": (
-                                show_date_time
-                                or ""
-                            ),
-                            "availability_status": (
-                                show_data.get(
-                                    "availStatus",
-                                    ""
-                                )
-                            ),
-                        }
-
-                        if (
-                            record["session_id"]
-                            and record["event_code"]
-                        ):
-
-                            discovered.append(
-                                record
-                            )
-
-    # --------------------------------------------------------
-    # DEDUPLICATE
-    # --------------------------------------------------------
-
-    unique = {}
-
-    for record in discovered:
-
-        key = (
-            record["event_code"],
-            record["session_id"],
-        )
-
-        unique[key] = record
-
-    discovered = list(
-        unique.values()
-    )
-
-    discovered.sort(
-        key=lambda x: (
-            x["format"],
-            x["show_time"],
-            x["session_id"],
-        )
-    )
-
-    return discovered
-
-
-# ============================================================
-# PRINT SHOW SUMMARY
-# ============================================================
-
-def print_show_summary(shows):
+            results.append([
+                timestamp,
+                MOVIE_NAME,
+                event_code,
+                VENUE_CODE,
+                session_id,
+                show_format,
+                show_time,
+                SHOW_DATE,
+                CITY,
+                row_number,
+                row_name,
+                category_code,
+                category,
+                parsed["seat_token"],
+                parsed["seat_code"],
+                parsed["seat_number"],
+                bms_state,
+            ])
 
     print()
     print("=" * 90)
-    print("CSWO SHOW SUMMARY")
+    print("SHOW SUMMARY")
     print("=" * 90)
 
-    if not shows:
+    print(f"Format     : {show_format}")
+    print(f"Show       : {show_time}")
+    print(f"Event      : {event_code}")
+    print(f"Session    : {session_id}")
+    print(f"Available  : {available_count}")
+    print(f"Sold       : {sold_count}")
+    print(f"Total      : {available_count + sold_count}")
 
-        print("NO CSWO SHOWS FOUND.")
+    print("=" * 90)
+
+    return results
+
+
+# ============================================================
+# PRINT SAMPLE
+# ============================================================
+
+def print_sample(rows):
+
+    if not rows:
+        return
+
+    print()
+    print("=" * 120)
+    print("SEAT SAMPLE")
+    print("=" * 120)
+
+    print(
+        "Format | Show Time | Session | Row | "
+        "Category | Seat Token | Seat Code | Seat No | Status"
+    )
+
+    print("-" * 120)
+
+    for row in rows[:20]:
+
+        print(
+            f"{row[5]} | "
+            f"{row[6]} | "
+            f"{row[4]} | "
+            f"{row[9]} | "
+            f"{row[12]} | "
+            f"{row[13]} | "
+            f"{row[14]} | "
+            f"{row[15]} | "
+            f"{row[16]}"
+        )
+
+    print("-" * 120)
+
+
+# ============================================================
+# GOOGLE SHEETS BATCH WRITE
+# ============================================================
+
+def write_to_sheet(sheet, rows):
+
+    if not rows:
+
+        print()
+        print("No seat records to write.")
 
         return
 
-    current_format = None
+    banner("WRITING ALL SEATS TO GOOGLE SHEETS")
 
-    for show in shows:
+    total = len(rows)
 
-        if show["format"] != current_format:
+    print(f"Total seat records: {total}")
 
-            current_format = show["format"]
+    for start in range(0, total, GOOGLE_BATCH_SIZE):
 
-            print()
-            print(
-                f"FORMAT: {current_format}"
-            )
+        batch = rows[
+            start:start + GOOGLE_BATCH_SIZE
+        ]
 
-            print(
-                "-" * 90
-            )
+        end = start + len(batch)
 
         print(
-            f"{show['show_time']:10} | "
+            f"Writing rows "
+            f"{start + 1}-{end} / {total}"
+        )
+
+        sheet.append_rows(
+            batch,
+            value_input_option="USER_ENTERED"
+        )
+
+    print()
+    print(
+        f"Google Sheet updated successfully. "
+        f"{total} seat records written."
+    )
+
+
+# ============================================================
+# TEST PARSER
+# ============================================================
+
+def test_parser():
+
+    banner("TESTING BMS SEAT PARSER")
+
+    tests = [
+        "B1042+2",
+        "B1043+3",
+        "A1052+1",
+        "A1053+2",
+        "B1048+6",
+        "B2049+7",
+        "D10216+10",
+        "A0+0",
+        "B0+0",
+    ]
+
+    for token in tests:
+
+        result = parse_seat_token(token)
+
+        print(
+            f"{token:<15} -> {result}"
+        )
+
+
+# ============================================================
+# SHOW DISCOVERY DISPLAY
+# ============================================================
+
+def print_show_list():
+
+    banner("CSWO SHOW LIST")
+
+    for index, show in enumerate(SHOWS, start=1):
+
+        print(
+            f"{index:02d}. "
+            f"{show['format']:<12} | "
+            f"{show['show_time']:<9} | "
             f"{show['event_code']} | "
             f"Session {show['session_id']}"
         )
 
     print()
-    print(
-        "TOTAL CSWO SHOWS:",
-        len(shows)
-    )
+    print(f"TOTAL SHOWS: {len(SHOWS)}")
 
-    event_codes = sorted(
-        set(
-            x["event_code"]
-            for x in shows
+    format_counts = {}
+
+    for show in SHOWS:
+
+        fmt = show["format"]
+
+        format_counts[fmt] = (
+            format_counts.get(fmt, 0) + 1
         )
-    )
-
-    print(
-        "EVENT CODES:",
-        ", ".join(event_codes)
-    )
-
-
-# ============================================================
-# SEAT LAYOUT
-# ============================================================
-
-def get_seat_layout(show):
-
-    event_code = show[
-        "event_code"
-    ]
-
-    session_id = show[
-        "session_id"
-    ]
 
     print()
-    print(
-        f"SEAT LAYOUT: "
-        f"{show['format']} "
-        f"{show['show_time']} "
-        f"Session {session_id}"
-    )
 
-    params = {
-        "eventCode": event_code,
-        "dateCode": DATE_CODE,
-        "regionCode": REGION_CODE,
-        "venueCode": VENUE_CODE,
-    }
-
-    # BMS endpoint returns the venue-level layout.
-    # The session is identified by the subsequent
-    # show/session URL context.
-
-    for attempt in range(1, 4):
-
-        try:
-
-            response = session.get(
-                SEATLAYOUT_URL,
-                params=params,
-                headers=HEADERS,
-                timeout=30
-            )
-
-            print(
-                "Seat API:",
-                response.status_code,
-                "|",
-                len(response.content),
-                "bytes"
-            )
-
-            if response.status_code == 200:
-
-                return response.json()
-
-            print(
-                response.text[:500]
-            )
-
-        except Exception as e:
-
-            print(
-                "Seat API error:",
-                e
-            )
-
-        time.sleep(2)
-
-    return None
-
-
-# ============================================================
-# PARSE SEATS
-# ============================================================
-
-def parse_seats(layout, show):
-
-    rows = []
-
-    if not layout:
-        return rows
-
-    event_data = (
-        layout
-        .get("data", {})
-        .get("eventData", {})
-    )
-
-    actual_event_code = event_data.get(
-        "eventCode",
-        show["event_code"]
-    )
-
-    event_name = event_data.get(
-        "eventName",
-        ""
-    )
-
-    seat_data = (
-        layout
-        .get("data", {})
-    )
-
-    # --------------------------------------------------------
-    # Find seat tokens recursively
-    # --------------------------------------------------------
-
-    def walk(obj):
-
-        if isinstance(
-            obj,
-            dict
-        ):
-
-            for key, value in obj.items():
-
-                if isinstance(
-                    value,
-                    str
-                ):
-
-                    # BMS seat tokens:
-                    # A1052+1
-                    # B2049+7
-                    # etc.
-                    matches = re.findall(
-                        r"\b([A-E])([12]\d+)\+(\d+)\b",
-                        value
-                    )
-
-                    for match in matches:
-
-                        row_letter = match[0]
-                        seat_code = (
-                            row_letter
-                            + match[1]
-                        )
-                        seat_number = match[2]
-
-                        status = (
-                            "SOLD"
-                            if seat_code[
-                                1:2
-                            ] == "2"
-                            else "AVAILABLE"
-                        )
-
-                        rows.append({
-                            "timestamp": datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            ),
-                            "event_code": actual_event_code,
-                            "movie": MOVIE_NAME,
-                            "city": CITY,
-                            "venue_code": VENUE_CODE,
-                            "venue_name": VENUE_NAME,
-                            "date": DATE_CODE,
-                            "format": show["format"],
-                            "show_time": show["show_time"],
-                            "session_id": show["session_id"],
-                            "event_name": event_name,
-                            "seat_token": (
-                                row_letter
-                                + match[1]
-                                + "+"
-                                + match[2]
-                            ),
-                            "seat_code": seat_code,
-                            "seat_number": seat_number,
-                            "status": status,
-                        })
-
-                else:
-
-                    walk(value)
-
-        elif isinstance(
-            obj,
-            list
-        ):
-
-            for item in obj:
-                walk(item)
-
-    walk(seat_data)
-
-    # --------------------------------------------------------
-    # Deduplicate
-    # --------------------------------------------------------
-
-    unique = {}
-
-    for row in rows:
-
-        key = (
-            row["event_code"],
-            row["session_id"],
-            row["seat_token"],
-        )
-
-        unique[key] = row
-
-    return list(
-        unique.values()
-    )
-
-
-# ============================================================
-# GOOGLE SHEETS WRITE
-# ============================================================
-
-def write_sheet(
-    sheet,
-    shows,
-    seat_rows
-):
-
-    print()
-    print("=" * 90)
-    print("WRITING TO GOOGLE SHEETS")
-    print("=" * 90)
-
-    headers = [
-        "timestamp",
-        "event_code",
-        "movie",
-        "city",
-        "venue_code",
-        "venue_name",
-        "date",
-        "format",
-        "show_time",
-        "session_id",
-        "event_name",
-        "seat_token",
-        "seat_code",
-        "seat_number",
-        "status",
-    ]
-
-    # Clear existing data
-    sheet.clear()
-
-    all_rows = [
-        headers
-    ]
-
-    for row in seat_rows:
-
-        all_rows.append([
-            row.get(
-                "timestamp",
-                ""
-            ),
-            row.get(
-                "event_code",
-                ""
-            ),
-            row.get(
-                "movie",
-                ""
-            ),
-            row.get(
-                "city",
-                ""
-            ),
-            row.get(
-                "venue_code",
-                ""
-            ),
-            row.get(
-                "venue_name",
-                ""
-            ),
-            row.get(
-                "date",
-                ""
-            ),
-            row.get(
-                "format",
-                ""
-            ),
-            row.get(
-                "show_time",
-                ""
-            ),
-            row.get(
-                "session_id",
-                ""
-            ),
-            row.get(
-                "event_name",
-                ""
-            ),
-            row.get(
-                "seat_token",
-                ""
-            ),
-            row.get(
-                "seat_code",
-                ""
-            ),
-            row.get(
-                "seat_number",
-                ""
-            ),
-            row.get(
-                "status",
-                ""
-            ),
-        ])
-
-    if len(all_rows) > 1:
-
-        sheet.update(
-            range_name="A1",
-            values=all_rows
-        )
+    for fmt, count in format_counts.items():
 
         print(
-            "Written",
-            len(seat_rows),
-            "seat records."
-        )
-
-    else:
-
-        sheet.update(
-            range_name="A1",
-            values=[headers]
-        )
-
-        print(
-            "No seat records."
+            f"{fmt}: {count} shows"
         )
 
 
@@ -965,206 +939,301 @@ def write_sheet(
 
 def main():
 
-    print("=" * 90)
-    print("BMS TOXIC CSWO ALL-FORMAT TRACKER")
-    print("=" * 90)
+    banner("BMS TOXIC CSWO ALL-SHOW SEAT TRACKER")
 
     print(
-        "Timestamp :",
-        datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        f"Timestamp : {get_ist_timestamp()}"
     )
 
     print(
-        "Movie     :",
-        MOVIE_NAME
+        f"Movie     : {MOVIE_NAME}"
     )
 
     print(
-        "City      :",
-        CITY
+        f"City      : {CITY}"
     )
 
     print(
-        "Venue     :",
-        VENUE_CODE
+        f"Venue     : {VENUE_CODE}"
     )
 
     print(
-        "Date      :",
-        DATE_CODE
+        f"Date      : {SHOW_DATE}"
     )
 
-    # --------------------------------------------------------
-    # GOOGLE
-    # --------------------------------------------------------
-
-    sheet = connect_google_sheet()
-
-    # --------------------------------------------------------
-    # SHOW DISCOVERY
-    # --------------------------------------------------------
-
-    data = get_showtime_data()
-
-    if not data:
-
-        print()
-        print(
-            "FAILED: Could not retrieve BMS showtime data."
-        )
-
-        return
-
-    shows = discover_cswo_shows(
-        data
+    print(
+        f"Shows     : {len(SHOWS)}"
     )
 
-    print_show_summary(
-        shows
-    )
+    print_show_list()
 
-    if not shows:
-
-        print()
-        print(
-            "STOPPING: No CSWO shows discovered."
-        )
-
-        return
+    test_parser()
 
     # --------------------------------------------------------
-    # SEAT TRACKING
+    # Google Sheets
     # --------------------------------------------------------
 
-    all_seats = []
+    sheet = init_google_sheet()
+
+    # --------------------------------------------------------
+    # Process every show
+    # --------------------------------------------------------
+
+    all_rows = []
+
+    successful_shows = 0
+
+    failed_shows = 0
+
+    show_summaries = []
 
     for index, show in enumerate(
-        shows,
+        SHOWS,
         start=1
     ):
 
-        print()
+        banner(
+            f"SHOW {index}/{len(SHOWS)}"
+        )
+
         print(
-            f"[{index}/{len(shows)}] "
-            f"{show['format']} | "
-            f"{show['show_time']} | "
-            f"{show['session_id']}"
+            f"Format     : {show['format']}"
         )
 
-        layout = get_seat_layout(
-            show
+        print(
+            f"Show Time  : {show['show_time']}"
         )
 
-        if layout:
+        print(
+            f"Event Code : {show['event_code']}"
+        )
 
-            seats = parse_seats(
-                layout,
-                show
-            )
+        print(
+            f"Session ID : {show['session_id']}"
+        )
 
+        # ----------------------------------------------------
+        # Request BMS seat layout
+        # ----------------------------------------------------
+
+        str_data = get_seat_layout(show)
+
+        if not str_data:
+
+            print()
             print(
-                "Seats parsed:",
-                len(seats)
+                f"FAILED: No seat layout for "
+                f"session {show['session_id']}"
             )
 
-            all_seats.extend(
-                seats
-            )
+            failed_shows += 1
+
+            show_summaries.append({
+                "format": show["format"],
+                "show_time": show["show_time"],
+                "session_id": show["session_id"],
+                "available": 0,
+                "sold": 0,
+                "total": 0,
+                "status": "FAILED",
+            })
 
         else:
 
-            print(
-                "No seat layout returned."
+            # ------------------------------------------------
+            # Parse seats
+            # ------------------------------------------------
+
+            rows = parse_seat_rows(
+                str_data,
+                show
             )
 
-        # Small pause between requests
-        time.sleep(1)
+            if rows:
+
+                successful_shows += 1
+
+                all_rows.extend(rows)
+
+                available = sum(
+                    1
+                    for row in rows
+                    if row[16] == "AVAILABLE"
+                )
+
+                sold = sum(
+                    1
+                    for row in rows
+                    if row[16] == "SOLD"
+                )
+
+                show_summaries.append({
+                    "format": show["format"],
+                    "show_time": show["show_time"],
+                    "session_id": show["session_id"],
+                    "available": available,
+                    "sold": sold,
+                    "total": len(rows),
+                    "status": "OK",
+                })
+
+                print_sample(rows)
+
+            else:
+
+                print(
+                    "WARNING: BMS returned strData "
+                    "but no seats were parsed."
+                )
+
+                failed_shows += 1
+
+                show_summaries.append({
+                    "format": show["format"],
+                    "show_time": show["show_time"],
+                    "session_id": show["session_id"],
+                    "available": 0,
+                    "sold": 0,
+                    "total": 0,
+                    "status": "NO SEATS",
+                })
+
+        # ----------------------------------------------------
+        # Delay before next BMS request
+        # ----------------------------------------------------
+
+        if index < len(SHOWS):
+
+            print()
+            print(
+                f"Waiting {DELAY_BETWEEN_SHOWS} seconds "
+                f"before next show..."
+            )
+
+            time.sleep(DELAY_BETWEEN_SHOWS)
 
     # --------------------------------------------------------
-    # FINAL DEDUPLICATION
+    # WRITE EVERYTHING AT ONCE
     # --------------------------------------------------------
 
-    unique = {}
-
-    for row in all_seats:
-
-        key = (
-            row["event_code"],
-            row["session_id"],
-            row["seat_token"],
-        )
-
-        unique[key] = row
-
-    all_seats = list(
-        unique.values()
-    )
-
-    # --------------------------------------------------------
-    # SHEET
-    # --------------------------------------------------------
-
-    write_sheet(
+    write_to_sheet(
         sheet,
-        shows,
-        all_seats
+        all_rows
     )
 
     # --------------------------------------------------------
     # FINAL SUMMARY
     # --------------------------------------------------------
 
+    banner("FINAL CSWO SUMMARY")
+
+    print(
+        f"Shows discovered : {len(SHOWS)}"
+    )
+
+    print(
+        f"Successful shows : {successful_shows}"
+    )
+
+    print(
+        f"Failed shows     : {failed_shows}"
+    )
+
+    print(
+        f"Seat records     : {len(all_rows)}"
+    )
+
     print()
-    print("=" * 90)
-    print("FINAL SUMMARY")
-    print("=" * 90)
 
     print(
-        "Shows discovered :",
-        len(shows)
+        "FORMAT       SHOWS     AVAILABLE     SOLD      TOTAL"
     )
 
-    print(
-        "Seat records      :",
-        len(all_seats)
-    )
+    print("-" * 70)
 
-    print()
-    print(
-        "Event/format breakdown:"
-    )
+    format_totals = {}
 
-    breakdown = {}
+    for summary in show_summaries:
 
-    for show in shows:
+        fmt = summary["format"]
 
-        key = (
-            show["event_code"],
-            show["format"],
+        if fmt not in format_totals:
+
+            format_totals[fmt] = {
+                "shows": 0,
+                "available": 0,
+                "sold": 0,
+                "total": 0,
+            }
+
+        format_totals[fmt]["shows"] += 1
+
+        format_totals[fmt]["available"] += (
+            summary["available"]
         )
 
-        breakdown[key] = (
-            breakdown.get(key, 0)
-            + 1
+        format_totals[fmt]["sold"] += (
+            summary["sold"]
         )
 
-    for key, count in sorted(
-        breakdown.items()
-    ):
+        format_totals[fmt]["total"] += (
+            summary["total"]
+        )
+
+    for fmt, values in format_totals.items():
 
         print(
-            f"{key[0]} | "
-            f"{key[1]} | "
-            f"{count} shows"
+            f"{fmt:<12} "
+            f"{values['shows']:>5} "
+            f"{values['available']:>13} "
+            f"{values['sold']:>9} "
+            f"{values['total']:>10}"
         )
 
     print()
+
     print(
-        "BMS TOXIC CSWO TRACKER COMPLETED"
+        "SHOW-BY-SHOW"
+    )
+
+    print("-" * 90)
+
+    for summary in show_summaries:
+
+        print(
+            f"{summary['format']:<12} | "
+            f"{summary['show_time']:<9} | "
+            f"{summary['session_id']:<6} | "
+            f"Available {summary['available']:<4} | "
+            f"Sold {summary['sold']:<4} | "
+            f"Total {summary['total']:<4} | "
+            f"{summary['status']}"
+        )
+
+    banner(
+        "BMS TOXIC CSWO ALL-SHOW TRACKER COMPLETED"
     )
 
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
-    main()
+
+    try:
+
+        main()
+
+    except Exception as error:
+
+        print()
+        print("=" * 90)
+        print("TRACKER FAILED")
+        print("=" * 90)
+
+        print(
+            f"Error: {repr(error)}"
+        )
+
+        raise
