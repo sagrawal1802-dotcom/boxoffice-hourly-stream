@@ -2,7 +2,6 @@ import json
 import re
 import time
 from datetime import datetime
-
 from playwright.sync_api import sync_playwright
 
 
@@ -11,43 +10,36 @@ from playwright.sync_api import sync_playwright
 # ============================================================
 
 MOVIE = "Toxic: A Fairy Tale for Grown-ups"
+
 CITY = "mumbai"
 REGION_CODE = "MUMBAI"
 DATE_CODE = "20260826"
 
-EVENT_CODES = [
-    "ET00379311",  # Hindi 2D
-    "ET00513458",  # IMAX
-    "ET00513506",  # 4DX
-]
-
-BMS_MOVIE_URL = (
+MOVIE_URL = (
     "https://in.bookmyshow.com/movies/mumbai/"
     "toxic-a-fairy-tale-for-grown-ups/ET00379311"
 )
 
-SHOWTIME_API = (
-    "https://in.bookmyshow.com/api/movies-data/v5/"
-    "showtimes-by-event/primary-dynamic"
-)
+EVENT_CODES = [
+    "ET00379311",
+    "ET00513458",
+    "ET00513506",
+]
 
 OUTPUT_FILE = "cinepolis_mumbai_discovery.json"
+RAW_FILE = "bms_captured_showtime_responses.json"
 
 
 # ============================================================
-# PRINT
+# HELPERS
 # ============================================================
 
-def banner(title):
+def banner(text):
     print()
     print("=" * 100)
-    print(title)
+    print(text)
     print("=" * 100)
 
-
-# ============================================================
-# NORMALIZE
-# ============================================================
 
 def clean(value):
     if value is None:
@@ -59,19 +51,11 @@ def clean(value):
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
-def lower(value):
-    return clean(value).lower()
-
-
-# ============================================================
-# CINEPOLIS DETECTION
-# ============================================================
-
 def is_cinepolis(value):
-    if value is None:
+    if not isinstance(value, str):
         return False
 
-    text = lower(value)
+    text = value.lower()
 
     return (
         "cinepolis" in text
@@ -80,57 +64,130 @@ def is_cinepolis(value):
 
 
 # ============================================================
-# RECURSIVE VENUE EXTRACTION
+# FIND CINEPOLIS IN ANY JSON STRUCTURE
 # ============================================================
 
-def recursive_find_venues(obj, path="root"):
-    """
-    Walk the complete BMS JSON.
+def scan_json_for_cinepolis(obj, path="root", results=None):
 
-    We intentionally don't assume a single fixed JSON structure.
-    BMS has changed the showtime response structure multiple times.
-    """
-
-    results = []
+    if results is None:
+        results = []
 
     if isinstance(obj, dict):
 
-        # Look for dictionary fields which look like venue information.
-        venue_text = ""
+        # Check whether this object itself contains Cinepolis.
+        object_text = []
 
-        for key in [
-            "venueName",
-            "venue_name",
-            "venue",
-            "cinemaName",
-            "cinema_name",
-            "theatreName",
-            "theatre_name",
-            "name",
-            "displayName",
-            "title",
-        ]:
-            value = obj.get(key)
+        for key, value in obj.items():
 
-            if isinstance(value, str) and value.strip():
-                if is_cinepolis(value):
-                    venue_text = value
-                    break
+            if isinstance(value, str):
+                object_text.append(value)
 
-        if venue_text:
+        joined = " | ".join(object_text)
+
+        if is_cinepolis(joined):
+
+            results.append({
+                "path": path,
+                "object": obj
+            })
+
+        for key, value in obj.items():
+
+            scan_json_for_cinepolis(
+                value,
+                f"{path}.{key}",
+                results
+            )
+
+    elif isinstance(obj, list):
+
+        for index, value in enumerate(obj):
+
+            scan_json_for_cinepolis(
+                value,
+                f"{path}[{index}]",
+                results
+            )
+
+    return results
+
+
+# ============================================================
+# EXTRACT VENUE-LIKE OBJECTS
+# ============================================================
+
+def extract_properties(obj, event_code="", path="root"):
+
+    found = []
+
+    if isinstance(obj, dict):
+
+        # Collect all string values.
+        strings = {}
+
+        for key, value in obj.items():
+
+            if isinstance(value, str):
+                strings[key] = clean(value)
+
+        cinepolis_fields = []
+
+        for key, value in strings.items():
+
+            if is_cinepolis(value):
+                cinepolis_fields.append((key, value))
+
+        if cinepolis_fields:
 
             record = {
-                "venue_name": clean(venue_text),
+                "event_code": event_code,
+                "venue_name": "",
                 "venue_code": "",
                 "address": "",
-                "event_code": "",
                 "format": "",
+                "language": "",
                 "session_id": "",
+                "time": "",
                 "path": path,
             }
 
-            # Venue identifiers
-            for key in [
+            # ------------------------------------------------
+            # Venue name
+            # ------------------------------------------------
+
+            name_keys = [
+                "venueName",
+                "venue_name",
+                "cinemaName",
+                "cinema_name",
+                "theatreName",
+                "theatre_name",
+                "name",
+                "displayName",
+                "display_name",
+                "title",
+            ]
+
+            for key in name_keys:
+
+                if key in strings:
+
+                    if is_cinepolis(strings[key]):
+
+                        record["venue_name"] = strings[key]
+                        break
+
+            # If no obvious venue-name field, use the
+            # Cinepolis-containing value.
+            if not record["venue_name"]:
+
+                record["venue_name"] = cinepolis_fields[0][1]
+
+            # ------------------------------------------------
+            # Venue code
+            # ------------------------------------------------
+
+            code_keys = [
                 "venueCode",
                 "venue_code",
                 "cinemaCode",
@@ -139,92 +196,121 @@ def recursive_find_venues(obj, path="root"):
                 "theatre_code",
                 "code",
                 "id",
-            ]:
-                value = obj.get(key)
+            ]
 
-                if value is not None:
-                    value = clean(value)
+            for key in code_keys:
 
-                    if value:
-                        record["venue_code"] = value
-                        break
+                if key in strings:
 
-            # Address
-            for key in [
-                "address",
-                "venueAddress",
-                "cinemaAddress",
-                "theatreAddress",
-                "location",
-            ]:
-                value = obj.get(key)
-
-                if isinstance(value, str):
-                    if value.strip():
-                        record["address"] = clean(value)
-                        break
-
-                elif isinstance(value, dict):
-                    parts = []
-
-                    for v in value.values():
-                        if isinstance(v, str):
-                            parts.append(v)
-
-                    if parts:
-                        record["address"] = clean(" ".join(parts))
-                        break
-
-            # Event
-            for key in [
-                "eventCode",
-                "event_code",
-                "etCode",
-                "et_code",
-            ]:
-                value = obj.get(key)
-
-                if value:
-                    record["event_code"] = clean(value)
+                    record["venue_code"] = strings[key]
                     break
 
+            # ------------------------------------------------
+            # Address
+            # ------------------------------------------------
+
+            address_keys = [
+                "address",
+                "venueAddress",
+                "venue_address",
+                "cinemaAddress",
+                "cinema_address",
+                "theatreAddress",
+                "theatre_address",
+            ]
+
+            for key in address_keys:
+
+                if key in strings:
+
+                    record["address"] = strings[key]
+                    break
+
+            # ------------------------------------------------
             # Format
-            for key in [
+            # ------------------------------------------------
+
+            format_keys = [
                 "format",
                 "formatName",
                 "format_name",
-                "languageFormat",
                 "screenFormat",
-            ]:
-                value = obj.get(key)
+                "screen_format",
+                "languageFormat",
+                "language_format",
+            ]
 
-                if isinstance(value, str) and value.strip():
-                    record["format"] = clean(value)
+            for key in format_keys:
+
+                if key in strings:
+
+                    record["format"] = strings[key]
                     break
 
+            # ------------------------------------------------
+            # Language
+            # ------------------------------------------------
+
+            language_keys = [
+                "language",
+                "languageName",
+                "language_name",
+            ]
+
+            for key in language_keys:
+
+                if key in strings:
+
+                    record["language"] = strings[key]
+                    break
+
+            # ------------------------------------------------
             # Session
-            for key in [
+            # ------------------------------------------------
+
+            session_keys = [
                 "sessionId",
                 "session_id",
                 "sessionCode",
                 "session_code",
-                "session",
-            ]:
-                value = obj.get(key)
+            ]
 
-                if value is not None:
-                    value = clean(value)
+            for key in session_keys:
 
-                    if value:
-                        record["session_id"] = value
-                        break
+                if key in strings:
 
-            results.append(record)
+                    record["session_id"] = strings[key]
+                    break
+
+            # ------------------------------------------------
+            # Time
+            # ------------------------------------------------
+
+            time_keys = [
+                "showTime",
+                "show_time",
+                "startTime",
+                "start_time",
+                "time",
+            ]
+
+            for key in time_keys:
+
+                if key in strings:
+
+                    record["time"] = strings[key]
+                    break
+
+            found.append(record)
+
+        # Continue recursively.
 
         for key, value in obj.items():
-            results.extend(
-                recursive_find_venues(
+
+            found.extend(
+                extract_properties(
                     value,
+                    event_code,
                     f"{path}.{key}"
                 )
             )
@@ -232,129 +318,100 @@ def recursive_find_venues(obj, path="root"):
     elif isinstance(obj, list):
 
         for index, value in enumerate(obj):
-            results.extend(
-                recursive_find_venues(
+
+            found.extend(
+                extract_properties(
                     value,
+                    event_code,
                     f"{path}[{index}]"
                 )
             )
-
-    return results
-
-
-# ============================================================
-# GENERIC TEXT SCAN
-# ============================================================
-
-def scan_cinepolis_strings(obj, found=None):
-
-    if found is None:
-        found = set()
-
-    if isinstance(obj, dict):
-
-        for key, value in obj.items():
-
-            if isinstance(value, str):
-
-                if is_cinepolis(value):
-                    found.add(clean(value))
-
-            elif isinstance(value, (dict, list)):
-                scan_cinepolis_strings(value, found)
-
-    elif isinstance(obj, list):
-
-        for value in obj:
-            scan_cinepolis_strings(value, found)
 
     return found
 
 
 # ============================================================
-# REQUEST SHOWTIME API THROUGH BROWSER SESSION
+# NETWORK RESPONSE HANDLER
 # ============================================================
 
-def request_showtime(page, event_code):
+def capture_response(response, captured):
 
-    params = {
-        "etCodes": "*",
-        "dateCode": DATE_CODE,
-        "isDesktop": "true",
-        "regionCode": REGION_CODE,
-        "xLocationShared": "false",
-        "memberId": "",
-        "lsId": "",
-        "subCode": "",
-        "appCode": "WEB",
-        "language": "hindi",
-        "refEventCode": event_code,
-    }
+    try:
 
-    print()
-    print("-" * 100)
-    print("REQUESTING SHOWTIME DATA")
-    print("-" * 100)
+        url = response.url
 
-    print("Event code:", event_code)
-    print("Endpoint:", SHOWTIME_API)
+        # Only inspect BMS responses.
+        if "bookmyshow.com" not in url:
+            return
 
-    print("\nParameters:")
-    print(json.dumps(params, indent=2))
+        resource_type = response.request.resource_type
 
-    for attempt in range(1, 4):
+        # Showtime API is normally XHR/fetch.
+        if resource_type not in [
+            "xhr",
+            "fetch",
+            "document",
+        ]:
+            return
 
-        print(f"\nAttempt {attempt}/3")
+        # We are especially interested in these.
+        interesting = (
+            "showtimes" in url.lower()
+            or "primary-dynamic" in url.lower()
+            or "movies-data" in url.lower()
+            or "event" in url.lower()
+        )
+
+        if not interesting:
+            return
+
+        print()
+        print("[NETWORK]")
+        print("Status :", response.status)
+        print("Type   :", resource_type)
+        print("URL    :", url)
 
         try:
 
-            response = page.request.get(
-                SHOWTIME_API,
-                params=params,
-                headers={
-                    "accept": "application/json, text/plain, */*",
-                    "referer": BMS_MOVIE_URL,
-                    "origin": "https://in.bookmyshow.com",
-                    "x-requested-with": "XMLHttpRequest",
-                },
-                timeout=60000,
-            )
-
-            print("HTTP status:", response.status)
-
             body = response.text()
-
-            print("Response size:", len(body))
-
-            if response.status == 200 and body:
-
-                try:
-                    data = json.loads(body)
-
-                    print("JSON received successfully.")
-
-                    return data
-
-                except Exception as e:
-
-                    print("JSON parse error:", e)
-
-                    print("Response preview:")
-                    print(body[:1000])
-
-            else:
-
-                print("Response preview:")
-                print(body[:500])
 
         except Exception as e:
 
-            print("Request error:", repr(e))
+            print("Could not read response:", repr(e))
+            return
 
-        if attempt < 3:
-            time.sleep(3)
+        print("Size   :", len(body))
 
-    return None
+        if not body:
+            return
+
+        # Don't store Cloudflare HTML.
+        if body.lstrip().startswith("<!DOCTYPE"):
+            print("Skipped HTML/Cloudflare response.")
+            return
+
+        try:
+
+            data = json.loads(body)
+
+        except Exception:
+
+            print("Response is not JSON.")
+            return
+
+        captured.append({
+            "timestamp": datetime.now().isoformat(),
+            "url": url,
+            "status": response.status,
+            "resource_type": resource_type,
+            "data": data,
+        })
+
+        print("JSON CAPTURED")
+
+    except Exception as e:
+
+        print("Response handler error:", repr(e))
 
 
 # ============================================================
@@ -372,14 +429,11 @@ def main():
     print("Event codes:", ", ".join(EVENT_CODES))
 
     print()
-    print("MODE:")
-    print("PROPERTY DISCOVERY ONLY")
-    print("NO GOOGLE SHEETS")
-    print("NO SEAT API")
-    print("NO SEAT PARSING")
+    print("IMPORTANT:")
+    print("This version does NOT directly request the BMS API.")
+    print("It captures responses generated by the BMS webpage.")
 
-    all_properties = []
-    raw_event_data = {}
+    captured = []
 
     with sync_playwright() as p:
 
@@ -410,121 +464,303 @@ def main():
 
         page = context.new_page()
 
-        # --------------------------------------------------------
-        # First establish BMS session.
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Capture all relevant network responses.
+        # ----------------------------------------------------
 
-        banner("ESTABLISHING BMS SESSION")
+        page.on(
+            "response",
+            lambda response: capture_response(
+                response,
+                captured
+            )
+        )
+
+        # ----------------------------------------------------
+        # Open movie page.
+        # ----------------------------------------------------
+
+        banner("OPENING TOXIC MUMBAI PAGE")
 
         try:
 
             response = page.goto(
-                BMS_MOVIE_URL,
+                MOVIE_URL,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
 
             if response:
-                print("Movie page HTTP status:", response.status)
-            else:
-                print("Movie page returned no response.")
+
+                print(
+                    "Movie page HTTP status:",
+                    response.status
+                )
 
         except Exception as e:
 
-            print("Movie page navigation error:", repr(e))
+            print(
+                "Movie page navigation error:",
+                repr(e)
+            )
 
-        print("Waiting for BMS session...")
-        time.sleep(8)
+        print()
+        print("Waiting for BMS JavaScript...")
+        time.sleep(10)
 
-        # Scroll to allow normal BMS JS to execute.
-        for _ in range(5):
+        # ----------------------------------------------------
+        # Scroll.
+        # ----------------------------------------------------
+
+        banner("SCROLLING BMS PAGE")
+
+        for i in range(8):
 
             try:
-                page.mouse.wheel(0, 2500)
+
+                page.mouse.wheel(
+                    0,
+                    2500
+                )
+
             except Exception:
                 pass
 
-            time.sleep(1)
-
-        # --------------------------------------------------------
-        # Request each known Toxic event.
-        # --------------------------------------------------------
-
-        for event_code in EVENT_CODES:
-
-            data = request_showtime(
-                page,
-                event_code
+            print(
+                f"Scroll {i + 1}/8"
             )
 
-            if data is None:
+            time.sleep(1.5)
 
-                print(
-                    f"\nNO SHOWTIME DATA FOR {event_code}"
+        # ----------------------------------------------------
+        # Wait for delayed requests.
+        # ----------------------------------------------------
+
+        print()
+        print(
+            "Waiting for delayed BMS responses..."
+        )
+
+        time.sleep(10)
+
+        # ----------------------------------------------------
+        # If the page didn't trigger showtime API,
+        # navigate to each event's buy-ticket page.
+        # ----------------------------------------------------
+
+        if len(captured) == 0:
+
+            banner(
+                "NO SHOWTIME RESPONSE YET - "
+                "OPENING EVENT PAGES"
+            )
+
+            for event_code in EVENT_CODES:
+
+                event_url = (
+                    "https://in.bookmyshow.com/movies/mumbai/"
+                    "toxic-a-fairy-tale-for-grown-ups/"
+                    f"buytickets/{event_code}/"
+                    f"{DATE_CODE}"
+                    "?etCodes=*"
+                    "&language=hindi"
+                    f"&refEventCode={event_code}"
                 )
 
-                continue
+                print()
+                print(
+                    "Opening:",
+                    event_code
+                )
 
-            raw_event_data[event_code] = data
+                try:
 
-            # ----------------------------------------------------
-            # Search JSON recursively.
-            # ----------------------------------------------------
+                    response = page.goto(
+                        event_url,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
 
-            records = recursive_find_venues(
-                data,
-                path="root"
-            )
+                    if response:
 
-            strings = scan_cinepolis_strings(
-                data
-            )
+                        print(
+                            "HTTP status:",
+                            response.status
+                        )
 
-            print()
-            print(
-                f"Cinepolis-related strings found: "
-                f"{len(strings)}"
-            )
+                except Exception as e:
 
-            for value in sorted(strings):
+                    print(
+                        "Navigation error:",
+                        repr(e)
+                    )
 
-                print("  ", value)
+                time.sleep(8)
 
-            print()
-            print(
-                f"Potential Cinepolis venue records: "
-                f"{len(records)}"
-            )
+                for i in range(4):
 
-            for record in records:
+                    try:
+                        page.mouse.wheel(
+                            0,
+                            2500
+                        )
+                    except Exception:
+                        pass
 
-                record["source_event_code"] = event_code
+                    time.sleep(1)
 
-                all_properties.append(record)
+                time.sleep(5)
 
-        # --------------------------------------------------------
-        # Close browser.
-        # --------------------------------------------------------
+        # ----------------------------------------------------
+        # Final wait.
+        # ----------------------------------------------------
+
+        time.sleep(5)
 
         browser.close()
 
-    # ============================================================
-    # DEDUPLICATE
-    # ============================================================
+    # ========================================================
+    # SAVE RAW CAPTURE
+    # ========================================================
+
+    banner("CAPTURE SUMMARY")
+
+    print(
+        "Captured BMS JSON responses:",
+        len(captured)
+    )
+
+    with open(
+        RAW_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            captured,
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    print(
+        "Saved raw responses:",
+        RAW_FILE
+    )
+
+    # ========================================================
+    # SEARCH FOR CINEPOLIS
+    # ========================================================
+
+    banner("SEARCHING CAPTURED BMS DATA")
+
+    all_records = []
+
+    all_cinepolis_strings = set()
+
+    for index, item in enumerate(captured, 1):
+
+        event_code = ""
+
+        url = item.get("url", "")
+
+        for code in EVENT_CODES:
+
+            if code in url:
+
+                event_code = code
+                break
+
+        data = item.get("data")
+
+        # ----------------------------------------------------
+        # Find every Cinepolis occurrence.
+        # ----------------------------------------------------
+
+        matches = scan_json_for_cinepolis(
+            data
+        )
+
+        print()
+        print(
+            f"Response {index}: "
+            f"Cinepolis matches = {len(matches)}"
+        )
+
+        for match in matches:
+
+            obj = match.get("object", {})
+
+            for key, value in obj.items():
+
+                if isinstance(value, str):
+
+                    if is_cinepolis(value):
+
+                        all_cinepolis_strings.add(
+                            clean(value)
+                        )
+
+        # ----------------------------------------------------
+        # Extract possible venue records.
+        # ----------------------------------------------------
+
+        records = extract_properties(
+            data,
+            event_code
+        )
+
+        all_records.extend(records)
+
+        print(
+            "Potential venue records:",
+            len(records)
+        )
+
+    # ========================================================
+    # PRINT CINEPOLIS STRINGS
+    # ========================================================
+
+    banner("CINEPOLIS TEXT FOUND")
+
+    if all_cinepolis_strings:
+
+        for value in sorted(
+            all_cinepolis_strings
+        ):
+
+            print(value)
+
+    else:
+
+        print(
+            "No Cinepolis text found in captured JSON."
+        )
+
+    # ========================================================
+    # DEDUPLICATE VENUES
+    # ========================================================
 
     unique = {}
 
-    for record in all_properties:
+    for record in all_records:
 
-        name = clean(record.get("venue_name"))
+        name = clean(
+            record.get("venue_name")
+        )
 
         if not name:
             continue
 
-        code = clean(record.get("venue_code"))
+        if not is_cinepolis(name):
+            continue
+
+        code = clean(
+            record.get("venue_code")
+        )
 
         key = (
-            lower(name),
+            name.lower(),
             code
         )
 
@@ -532,49 +768,46 @@ def main():
 
             unique[key] = record
 
-        else:
+    properties = list(
+        unique.values()
+    )
 
-            existing = unique[key]
+    # ========================================================
+    # PRINT PROPERTIES
+    # ========================================================
 
-            for field in [
-                "address",
-                "event_code",
-                "format",
-                "session_id",
-            ]:
-
-                if (
-                    not existing.get(field)
-                    and record.get(field)
-                ):
-                    existing[field] = record[field]
-
-    properties = list(unique.values())
-
-    # ============================================================
-    # RESULT
-    # ============================================================
-
-    banner("CINEPOLIS PROPERTIES FOUND IN MUMBAI")
+    banner(
+        "CINEPOLIS PROPERTIES FOUND IN MUMBAI"
+    )
 
     if not properties:
 
-        print("NO CINEPOLIS VENUE RECORDS WERE EXTRACTED.")
+        print(
+            "NO CINEPOLIS VENUE RECORDS FOUND."
+        )
 
         print()
         print(
-            "IMPORTANT: This does NOT mean there are no Cinepolis "
-            "properties."
+            "Raw BMS responses have been saved."
         )
 
         print(
-            "It means the BMS response structure did not expose "
-            "the venue field in the expected form."
+            "File:",
+            RAW_FILE
+        )
+
+        print()
+        print(
+            "Captured responses:",
+            len(captured)
         )
 
     else:
 
-        for index, record in enumerate(properties, 1):
+        for index, record in enumerate(
+            properties,
+            1
+        ):
 
             print()
             print(
@@ -584,40 +817,59 @@ def main():
 
             print(
                 "    Venue Code :",
-                record.get("venue_code", "")
+                record.get(
+                    "venue_code",
+                    ""
+                )
             )
 
             print(
                 "    Address    :",
-                record.get("address", "")
+                record.get(
+                    "address",
+                    ""
+                )
             )
 
             print(
                 "    Event Code :",
-                record.get("event_code", "")
+                record.get(
+                    "event_code",
+                    ""
+                )
             )
 
             print(
                 "    Format     :",
-                record.get("format", "")
+                record.get(
+                    "format",
+                    ""
+                )
             )
 
             print(
-                "    Session    :",
-                record.get("session_id", "")
+                "    Language   :",
+                record.get(
+                    "language",
+                    ""
+                )
             )
 
-    # ============================================================
-    # SAVE OUTPUT
-    # ============================================================
+    # ========================================================
+    # SAVE DISCOVERY RESULT
+    # ========================================================
 
     output = {
         "timestamp": datetime.now().isoformat(),
         "movie": MOVIE,
         "city": CITY,
-        "region_code": REGION_CODE,
+        "region": REGION_CODE,
         "date": DATE_CODE,
         "event_codes": EVENT_CODES,
+        "captured_responses": len(captured),
+        "cinepolis_strings": sorted(
+            all_cinepolis_strings
+        ),
         "properties": properties,
         "property_count": len(properties),
     }
@@ -635,13 +887,27 @@ def main():
             ensure_ascii=False
         )
 
-    print()
-    print("=" * 100)
-    print("DISCOVERY COMPLETED")
-    print("=" * 100)
-    print("Cinepolis properties:", len(properties))
-    print("Saved:", OUTPUT_FILE)
-    print("=" * 100)
+    banner("DISCOVERY COMPLETED")
+
+    print(
+        "Cinepolis properties:",
+        len(properties)
+    )
+
+    print(
+        "Captured responses:",
+        len(captured)
+    )
+
+    print(
+        "Raw file:",
+        RAW_FILE
+    )
+
+    print(
+        "Discovery file:",
+        OUTPUT_FILE
+    )
 
 
 if __name__ == "__main__":
