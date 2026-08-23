@@ -1,53 +1,36 @@
-name: BMS Venue All Shows Tracker
+name: Toxic CSWO All Shows
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-tracker:
+  toxic-cswo:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install gspread google-auth pytz curl_cffi playwright
+          pip install curl_cffi gspread google-auth pytz playwright
 
-      - name: Install Playwright Chromium
+      - name: Install Chromium
         run: |
-          python -m playwright install --with-deps chromium
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
 
-      - name: Verify Repository
-        run: |
-          echo "Working directory:"
-          pwd
-
-          echo ""
-          echo "Repository contents:"
-          ls -la
-
-          echo ""
-          echo "Checking tracker.py:"
-          if [ ! -f tracker.py ]; then
-            echo "ERROR: tracker.py was not found"
-            exit 1
-          fi
-
-          echo "tracker.py found successfully"
-
-      - name: Run BMS Tracker
+      - name: Run Toxic CSWO Tracker
         env:
           SPREADSHEET_ID: "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
           GCP_SA_KEY_B64: ${{ secrets.GCP_SA_KEY_B64 }}
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-          PYTHONUNBUFFERED: "1"
         run: |
           python tracker.py
