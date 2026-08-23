@@ -8,6 +8,7 @@ from datetime import datetime
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
+
 from playwright.sync_api import sync_playwright
 
 
@@ -20,69 +21,67 @@ SPREADSHEET_ID = os.environ.get(
     "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
 )
 
+MOVIE_NAME = "Toxic: A Fairy Tale for Grown-ups"
+
 CITY = "mumbai"
 
-EVENT_CODE = "ET00379311"
+REGION_CODE = "MUMBAI"
 
 VENUE_CODE = "CSWO"
 
 SHOW_DATE = "20260826"
 
-MOVIE_NAME = "Toxic: A Fairy Tale for Grown-ups"
 
-
-# ------------------------------------------------------------
+# ============================================================
 # FORMAT FILTER
 #
 # [] = ALL FORMATS
 #
-# ["2D"] = only 2D
+# Examples:
 #
-# ["2D", "IMAX 2D"] = both
-# ------------------------------------------------------------
+# FORMAT_FILTER = ["2D"]
+#
+# FORMAT_FILTER = ["2D", "IMAX 2D"]
+#
+# FORMAT_FILTER = ["2D", "IMAX 2D", "4DX"]
+# ============================================================
 
 FORMAT_FILTER = []
 
 
-# ------------------------------------------------------------
-# Discovery page
-# ------------------------------------------------------------
+# ============================================================
+# BMS PAGE
+#
+# The HAR shows BMS using the buytickets page and then calling
+# primary-dynamic from that page.
+# ============================================================
 
-MOVIE_PAGE = (
+BUY_TICKETS_URL = (
     "https://in.bookmyshow.com/movies/"
     f"{CITY}/toxic-a-fairy-tale-for-grown-ups/"
-    f"{EVENT_CODE}"
+    f"buytickets/ET00513506/{SHOW_DATE}"
+    "?etCodes=*&language=hindi&refEventCode=ET00513506"
 )
 
 
-# ------------------------------------------------------------
-# Delays
-# ------------------------------------------------------------
+# ============================================================
+# TIMING
+# ============================================================
 
-DISCOVERY_WAIT = 8
+PAGE_WAIT_SECONDS = 8
 
-DELAY_BETWEEN_SESSIONS = 2
+BETWEEN_SESSIONS_SECONDS = 2
 
 PAGE_TIMEOUT = 60000
 
 
 # ============================================================
-# GOOGLE AUTH
+# GOOGLE SHEET NAMES
 # ============================================================
 
-GCP_SA_KEY = (
-    os.environ.get("GCP_SA_KEY_B64")
-    or os.environ.get("GCP_SA_KEY")
-)
+SHOW_SHEET_NAME = "Shows"
 
-
-# ============================================================
-# SHEET NAMES
-# ============================================================
-
-SHOW_SHEET = "Shows"
-
-SEAT_SHEET = "SeatLog"
+SEAT_SHEET_NAME = "SeatLog"
 
 
 # ============================================================
@@ -92,30 +91,31 @@ SEAT_SHEET = "SeatLog"
 SHOW_HEADERS = [
     "Timestamp IST",
     "Movie",
-    "Event Code",
     "City",
     "Venue",
     "Venue Code",
     "Date",
     "Show Time",
     "Session ID",
+    "Event Code",
     "Format",
     "Language",
     "Screen",
-    "Source URL",
+    "Source",
 ]
 
 
 SEAT_HEADERS = [
     "Timestamp IST",
     "Movie",
-    "Event Code",
     "City",
     "Venue Code",
     "Date",
     "Show Time",
     "Session ID",
+    "Event Code",
     "Format",
+    "Language",
     "Row Number",
     "Row Name",
     "Category Code",
@@ -128,18 +128,10 @@ SEAT_HEADERS = [
 
 
 # ============================================================
-# UTILITY
+# TIMESTAMP
 # ============================================================
 
-def banner(text):
-
-    print()
-    print("=" * 80)
-    print(text)
-    print("=" * 80)
-
-
-def timestamp():
+def now_ist():
 
     return datetime.now(
         pytz.timezone("Asia/Kolkata")
@@ -149,54 +141,73 @@ def timestamp():
 
 
 # ============================================================
-# GOOGLE SHEETS
+# BANNER
 # ============================================================
 
-def decode_google_key():
+def banner(text):
 
-    if not GCP_SA_KEY:
+    print()
+    print("=" * 90)
+    print(text)
+    print("=" * 90)
 
-        raise ValueError(
-            "Missing GCP_SA_KEY_B64 or GCP_SA_KEY secret."
+
+# ============================================================
+# GOOGLE AUTH
+# ============================================================
+
+def get_service_account():
+
+    value = (
+        os.environ.get("GCP_SA_KEY_B64")
+        or os.environ.get("GCP_SA_KEY")
+    )
+
+    if not value:
+
+        raise RuntimeError(
+            "Missing GCP_SA_KEY_B64 or GCP_SA_KEY GitHub secret."
         )
 
-    value = GCP_SA_KEY.strip()
+    value = value.strip()
 
-    # Direct JSON secret
+    # Direct JSON
     if value.startswith("{"):
 
         return json.loads(value)
 
-    # Base64 secret
-    try:
+    # Base64 JSON
+    decoded = base64.b64decode(
+        value
+    ).decode(
+        "utf-8"
+    )
 
-        decoded = base64.b64decode(
-            value
-        ).decode("utf-8")
-
-        return json.loads(decoded)
-
-    except Exception as error:
-
-        raise ValueError(
-            f"Could not decode Google service account: {error}"
-        )
+    return json.loads(
+        decoded
+    )
 
 
 def connect_google():
 
-    banner("CONNECTING TO GOOGLE SHEETS")
+    banner(
+        "CONNECTING TO GOOGLE SHEETS"
+    )
 
-    service_account = decode_google_key()
+    service_account = (
+        get_service_account()
+    )
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
 
-    credentials = Credentials.from_service_account_info(
-        service_account,
-        scopes=scopes
+    credentials = (
+        Credentials.from_service_account_info(
+            service_account,
+            scopes=scopes
+        )
     )
 
     client = gspread.authorize(
@@ -208,62 +219,75 @@ def connect_google():
     )
 
     # --------------------------------------------------------
-    # Shows sheet
+    # SHOWS
     # --------------------------------------------------------
 
     try:
 
-        shows = spreadsheet.worksheet(
-            SHOW_SHEET
+        show_sheet = (
+            spreadsheet.worksheet(
+                SHOW_SHEET_NAME
+            )
         )
 
     except gspread.WorksheetNotFound:
 
-        shows = spreadsheet.add_worksheet(
-            title=SHOW_SHEET,
-            rows=5000,
-            cols=len(SHOW_HEADERS)
+        show_sheet = (
+            spreadsheet.add_worksheet(
+                title=SHOW_SHEET_NAME,
+                rows=5000,
+                cols=len(SHOW_HEADERS)
+            )
         )
 
     # --------------------------------------------------------
-    # Seat sheet
+    # SEATS
     # --------------------------------------------------------
 
     try:
 
-        seats = spreadsheet.worksheet(
-            SEAT_SHEET
+        seat_sheet = (
+            spreadsheet.worksheet(
+                SEAT_SHEET_NAME
+            )
         )
 
     except gspread.WorksheetNotFound:
 
-        seats = spreadsheet.add_worksheet(
-            title=SEAT_SHEET,
-            rows=50000,
-            cols=len(SEAT_HEADERS)
+        seat_sheet = (
+            spreadsheet.add_worksheet(
+                title=SEAT_SHEET_NAME,
+                rows=100000,
+                cols=len(SEAT_HEADERS)
+            )
         )
 
     # --------------------------------------------------------
     # Headers
     # --------------------------------------------------------
 
-    if not shows.get_all_values():
+    if not show_sheet.get_all_values():
 
-        shows.append_row(
+        show_sheet.append_row(
             SHOW_HEADERS,
             value_input_option="USER_ENTERED"
         )
 
-    if not seats.get_all_values():
+    if not seat_sheet.get_all_values():
 
-        seats.append_row(
+        seat_sheet.append_row(
             SEAT_HEADERS,
             value_input_option="USER_ENTERED"
         )
 
-    print("Google Sheets connected.")
+    print(
+        "Google Sheets connected."
+    )
 
-    return shows, seats
+    return (
+        show_sheet,
+        seat_sheet
+    )
 
 
 # ============================================================
@@ -272,14 +296,18 @@ def connect_google():
 
 def normalize_format(value):
 
-    if not value:
+    if value is None:
+
         return ""
 
-    value = value.upper().strip()
+    value = str(
+        value
+    ).strip().upper()
 
-    value = value.replace(
-        "  ",
-        " "
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
     )
 
     return value
@@ -287,11 +315,11 @@ def normalize_format(value):
 
 def format_allowed(fmt):
 
-    # Empty filter means ALL formats
     if not FORMAT_FILTER:
+
         return True
 
-    normalized = normalize_format(
+    target = normalize_format(
         fmt
     )
 
@@ -300,113 +328,132 @@ def format_allowed(fmt):
         for x in FORMAT_FILTER
     ]
 
-    return normalized in allowed
+    return target in allowed
+
+
+# ============================================================
+# GENERIC VALUE HELPERS
+# ============================================================
+
+def first_value(
+    obj,
+    keys
+):
+
+    if not isinstance(
+        obj,
+        dict
+    ):
+
+        return None
+
+    lower_map = {
+        str(k).lower(): v
+        for k, v in obj.items()
+    }
+
+    for key in keys:
+
+        value = lower_map.get(
+            key.lower()
+        )
+
+        if value is not None:
+
+            if value != "":
+
+                return value
+
+    return None
+
+
+def clean_text(value):
+
+    if value is None:
+
+        return ""
+
+    if isinstance(
+        value,
+        (dict, list)
+    ):
+
+        return ""
+
+    return str(
+        value
+    ).strip()
 
 
 # ============================================================
 # TIME EXTRACTION
 # ============================================================
 
-TIME_PATTERN = re.compile(
-    r"\b("
-    r"\d{1,2}:\d{2}\s*(?:AM|PM)"
-    r")\b",
+TIME_RE = re.compile(
+    r"\b"
+    r"(\d{1,2}:\d{2})"
+    r"\s*"
+    r"(AM|PM)"
+    r"\b",
     re.I
 )
 
 
-def extract_time(text):
+def extract_time(value):
 
-    if not text:
-        return None
+    if value is None:
 
-    match = TIME_PATTERN.search(
+        return ""
+
+    text = str(
+        value
+    )
+
+    match = TIME_RE.search(
         text
     )
 
-    if not match:
-        return None
+    if match:
 
-    return match.group(1).upper()
-
-
-# ============================================================
-# SESSION ID EXTRACTION
-# ============================================================
-
-SESSION_PATTERNS = [
-
-    re.compile(
-        r"/seat-layout/"
-        r"ET\d+/"
-        r"([A-Z0-9]+)/"
-        r"(\d+)/"
-        r"(\d{8})",
-        re.I
-    ),
-
-    re.compile(
-        r"[?&]session(?:Id|ID|id)=(\d+)",
-        re.I
-    ),
-
-    re.compile(
-        r"[?&]session=(\d+)",
-        re.I
-    ),
-]
-
-
-def extract_session_id(text):
-
-    if not text:
-        return None
-
-    for pattern in SESSION_PATTERNS:
-
-        match = pattern.search(
-            text
+        return (
+            match.group(1)
+            + " "
+            + match.group(2).upper()
         )
 
-        if match:
-
-            # First pattern has venue/session/date
-            if len(match.groups()) >= 3:
-
-                return match.group(2)
-
-            return match.group(1)
-
-    return None
+    return ""
 
 
 # ============================================================
 # FORMAT EXTRACTION
 # ============================================================
 
-FORMAT_WORDS = [
-    "IMAX 2D",
+FORMAT_NAMES = [
     "DOLBY CINEMA 2D",
+    "IMAX 2D",
     "DOLBY CINEMA",
     "4DX",
     "EPIQ",
-    "ICE",
     "MX4D",
     "SCREEN X",
-    "2D",
     "3D",
+    "2D",
 ]
 
 
-def extract_format(text):
+def extract_format_from_text(
+    text
+):
 
     if not text:
+
         return ""
 
-    upper = text.upper()
+    upper = str(
+        text
+    ).upper()
 
-    # Longest / most specific first
-    for fmt in FORMAT_WORDS:
+    for fmt in FORMAT_NAMES:
 
         if fmt in upper:
 
@@ -419,7 +466,7 @@ def extract_format(text):
 # LANGUAGE EXTRACTION
 # ============================================================
 
-LANGUAGES = [
+LANGUAGE_NAMES = [
     "HINDI",
     "ENGLISH",
     "KANNADA",
@@ -433,16 +480,21 @@ LANGUAGES = [
 ]
 
 
-def extract_language(text):
+def extract_language_from_text(
+    text
+):
 
     if not text:
+
         return ""
 
-    upper = text.upper()
+    upper = str(
+        text
+    ).upper()
 
     found = []
 
-    for language in LANGUAGES:
+    for language in LANGUAGE_NAMES:
 
         if language in upper:
 
@@ -450,67 +502,484 @@ def extract_language(text):
                 language.title()
             )
 
-    return ", ".join(found)
+    return ", ".join(
+        found
+    )
 
 
 # ============================================================
-# DISCOVER SHOWS FROM BMS PAGE
+# SESSION ID
 # ============================================================
 
-def discover_shows(page):
+SESSION_KEYS = [
+    "sessionId",
+    "sessionID",
+    "showSessionId",
+    "show_session_id",
+    "session_id",
+]
+
+
+def get_session_id(obj):
+
+    value = first_value(
+        obj,
+        SESSION_KEYS
+    )
+
+    if value is None:
+
+        return ""
+
+    text = str(
+        value
+    ).strip()
+
+    # Session IDs in the BMS data are numeric
+    if not re.fullmatch(
+        r"\d+",
+        text
+    ):
+
+        return ""
+
+    return text
+
+
+# ============================================================
+# EVENT CODE
+# ============================================================
+
+EVENT_KEYS = [
+    "eventCode",
+    "event_code",
+    "eventcode",
+]
+
+
+def get_event_code(obj):
+
+    value = first_value(
+        obj,
+        EVENT_KEYS
+    )
+
+    if value is None:
+
+        return ""
+
+    text = str(
+        value
+    ).strip()
+
+    if re.fullmatch(
+        r"ET\d+",
+        text,
+        re.I
+    ):
+
+        return text.upper()
+
+    return ""
+
+
+# ============================================================
+# VENUE CODE
+# ============================================================
+
+VENUE_KEYS = [
+    "venueCode",
+    "venue_code",
+    "venuecode",
+]
+
+
+def get_venue_code(obj):
+
+    value = first_value(
+        obj,
+        VENUE_KEYS
+    )
+
+    if value is None:
+
+        return ""
+
+    return str(
+        value
+    ).strip().upper()
+
+
+# ============================================================
+# RECURSIVE SHOW DISCOVERY
+#
+# This is deliberately generic because BMS can change the
+# nesting of showtimesSections/showtimes.
+# ============================================================
+
+def walk_bms(
+    node,
+    context,
+    results
+):
+
+    if isinstance(
+        node,
+        dict
+    ):
+
+        local = dict(
+            context
+        )
+
+        # ----------------------------------------------------
+        # Update inherited context
+        # ----------------------------------------------------
+
+        venue = get_venue_code(
+            node
+        )
+
+        if venue:
+
+            local["venue"] = venue
+
+        event = get_event_code(
+            node
+        )
+
+        if event:
+
+            local["event"] = event
+
+        # Format
+        fmt_value = first_value(
+            node,
+            [
+                "format",
+                "formatName",
+                "format_name",
+                "experience",
+                "screenFormat",
+            ]
+        )
+
+        fmt = extract_format_from_text(
+            clean_text(
+                fmt_value
+            )
+        )
+
+        if not fmt:
+
+            # Search title/name/label/header
+            for key in [
+                "title",
+                "name",
+                "label",
+                "header",
+                "displayName",
+                "display_name",
+            ]:
+
+                value = first_value(
+                    node,
+                    [key]
+                )
+
+                candidate = (
+                    extract_format_from_text(
+                        clean_text(value)
+                    )
+                )
+
+                if candidate:
+
+                    fmt = candidate
+                    break
+
+        if fmt:
+
+            local["format"] = fmt
+
+        # Language
+        lang_value = first_value(
+            node,
+            [
+                "language",
+                "languageName",
+                "language_name",
+            ]
+        )
+
+        lang = clean_text(
+            lang_value
+        )
+
+        if lang:
+
+            local["language"] = lang
+
+        # Screen
+        screen_value = first_value(
+            node,
+            [
+                "screen",
+                "screenName",
+                "screen_name",
+                "screenNumber",
+            ]
+        )
+
+        screen = clean_text(
+            screen_value
+        )
+
+        if screen:
+
+            local["screen"] = screen
+
+        # Time
+        for key in [
+            "showTime",
+            "showtime",
+            "show_time",
+            "startTime",
+            "start_time",
+            "time",
+            "displayTime",
+            "display_time",
+        ]:
+
+            value = first_value(
+                node,
+                [key]
+            )
+
+            show_time = extract_time(
+                value
+            )
+
+            if show_time:
+
+                local["time"] = show_time
+                break
+
+        # ----------------------------------------------------
+        # Session
+        # ----------------------------------------------------
+
+        session_id = get_session_id(
+            node
+        )
+
+        if session_id:
+
+            result = {
+                "session_id": session_id,
+                "event_code": local.get(
+                    "event",
+                    ""
+                ),
+                "venue_code": local.get(
+                    "venue",
+                    ""
+                ),
+                "format": local.get(
+                    "format",
+                    ""
+                ),
+                "language": local.get(
+                    "language",
+                    ""
+                ),
+                "screen": local.get(
+                    "screen",
+                    ""
+                ),
+                "show_time": local.get(
+                    "time",
+                    ""
+                ),
+            }
+
+            # ------------------------------------------------
+            # Search the complete node for additional hints
+            # ------------------------------------------------
+
+            serialized = json.dumps(
+                node,
+                ensure_ascii=False
+            )
+
+            if not result["format"]:
+
+                result["format"] = (
+                    extract_format_from_text(
+                        serialized
+                    )
+                )
+
+            if not result["language"]:
+
+                result["language"] = (
+                    extract_language_from_text(
+                        serialized
+                    )
+                )
+
+            if not result["show_time"]:
+
+                result["show_time"] = (
+                    extract_time(
+                        serialized
+                    )
+                )
+
+            # ------------------------------------------------
+            # Only CSWO
+            # ------------------------------------------------
+
+            if (
+                result["venue_code"]
+                and
+                result["venue_code"]
+                != VENUE_CODE
+            ):
+
+                pass
+
+            else:
+
+                key = (
+                    result["event_code"],
+                    result["session_id"]
+                )
+
+                # Avoid duplicates
+                results[key] = result
+
+        # ----------------------------------------------------
+        # Continue recursively
+        # ----------------------------------------------------
+
+        for value in node.values():
+
+            if isinstance(
+                value,
+                (dict, list)
+            ):
+
+                walk_bms(
+                    value,
+                    local,
+                    results
+                )
+
+    elif isinstance(
+        node,
+        list
+    ):
+
+        for item in node:
+
+            walk_bms(
+                item,
+                context,
+                results
+            )
+
+
+# ============================================================
+# DISCOVER SHOWS FROM BMS NETWORK
+# ============================================================
+
+def discover_shows(
+    page
+):
 
     banner(
-        "DISCOVERING TOXIC SHOWS AT CSWO"
+        "BMS SHOW DISCOVERY"
     )
 
     print(
-        f"Movie page:\n{MOVIE_PAGE}"
+        f"URL:\n{BUY_TICKETS_URL}"
     )
 
     print()
+    print(
+        f"Venue filter : {VENUE_CODE}"
+    )
+
     print(
         f"Format filter: "
         f"{FORMAT_FILTER if FORMAT_FILTER else 'ALL FORMATS'}"
     )
 
-    discovered = {}
+    responses = []
 
     # --------------------------------------------------------
-    # Capture every navigation/request URL
+    # Capture the exact BMS endpoint shown in HAR
     # --------------------------------------------------------
 
-    captured_urls = []
+    def handle_response(
+        response
+    ):
 
-    def capture_request(request):
-
-        url = request.url
+        url = response.url
 
         if (
-            "bookmyshow.com" in url.lower()
-            and (
-                "seat-layout" in url.lower()
-                or "buytickets" in url.lower()
-                or "session" in url.lower()
-            )
+            "/api/movies-data/v5/"
+            "showtimes-by-event/"
+            "primary-dynamic"
+            in url
         ):
 
-            captured_urls.append(
-                url
+            print()
+            print(
+                "FOUND BMS SHOWTIME RESPONSE"
             )
 
+            print(
+                f"HTTP: {response.status}"
+            )
+
+            print(
+                f"URL: {url[:500]}"
+            )
+
+            try:
+
+                data = response.json()
+
+                responses.append(
+                    data
+                )
+
+                print(
+                    "JSON response captured."
+                )
+
+            except Exception as error:
+
+                print(
+                    f"Could not parse JSON: "
+                    f"{error}"
+                )
+
     page.on(
-        "request",
-        capture_request
+        "response",
+        handle_response
     )
 
     # --------------------------------------------------------
-    # Open movie page
+    # Navigate
     # --------------------------------------------------------
 
     try:
 
         response = page.goto(
-            MOVIE_PAGE,
+            BUY_TICKETS_URL,
             wait_until="domcontentloaded",
             timeout=PAGE_TIMEOUT
         )
@@ -518,298 +987,230 @@ def discover_shows(page):
         if response:
 
             print(
-                f"Movie page HTTP status: "
+                f"Page HTTP status: "
                 f"{response.status}"
             )
 
     except Exception as error:
 
         print(
-            f"Movie page navigation error: "
+            f"Navigation error: "
             f"{error}"
         )
 
         return []
 
     # --------------------------------------------------------
-    # Wait for BMS dynamic content
+    # Give BMS time to call API
     # --------------------------------------------------------
 
     print(
-        f"Waiting {DISCOVERY_WAIT} seconds "
-        f"for BMS show data..."
+        f"Waiting {PAGE_WAIT_SECONDS} seconds "
+        f"for BMS showtime API..."
     )
 
     page.wait_for_timeout(
-        DISCOVERY_WAIT * 1000
+        PAGE_WAIT_SECONDS * 1000
     )
 
     # --------------------------------------------------------
-    # Scroll page to trigger lazy loading
+    # Sometimes BMS has not fired the API yet.
+    # Wait a little more if required.
     # --------------------------------------------------------
 
-    try:
-
-        for _ in range(5):
-
-            page.mouse.wheel(
-                0,
-                1500
-            )
-
-            page.wait_for_timeout(
-                1000
-            )
-
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # Capture DOM links
-    # --------------------------------------------------------
-
-    links = page.locator(
-        "a"
-    )
-
-    link_count = links.count()
-
-    print(
-        f"Links found on page: "
-        f"{link_count}"
-    )
-
-    for i in range(
-        min(link_count, 3000)
-    ):
-
-        try:
-
-            element = links.nth(i)
-
-            href = element.get_attribute(
-                "href"
-            )
-
-            if not href:
-                continue
-
-            text = element.inner_text(
-                timeout=1000
-            )
-
-            combined = (
-                (text or "")
-                + " "
-                + href
-            )
-
-            # Only care about this venue
-            if VENUE_CODE.upper() not in combined.upper():
-
-                # Still retain captured URLs below
-                pass
-
-            session_id = extract_session_id(
-                href
-            )
-
-            if not session_id:
-                continue
-
-            show_time = extract_time(
-                text
-            )
-
-            fmt = extract_format(
-                combined
-            )
-
-            language = extract_language(
-                combined
-            )
-
-            if not format_allowed(fmt):
-
-                continue
-
-            key = session_id
-
-            discovered[key] = {
-                "show_time": show_time or "",
-                "session_id": session_id,
-                "format": fmt or "",
-                "language": language or "",
-                "screen": "",
-                "url": href,
-            }
-
-        except Exception:
-
-            continue
-
-    # --------------------------------------------------------
-    # Process captured network URLs
-    # --------------------------------------------------------
-
-    for url in captured_urls:
-
-        session_id = extract_session_id(
-            url
-        )
-
-        if not session_id:
-            continue
-
-        # We don't always get format from URL.
-        # Keep the session and let DOM data supply
-        # the format where available.
-
-        if session_id not in discovered:
-
-            discovered[session_id] = {
-                "show_time": "",
-                "session_id": session_id,
-                "format": "",
-                "language": "",
-                "screen": "",
-                "url": url,
-            }
-
-    # --------------------------------------------------------
-    # Filter by venue where possible
-    # --------------------------------------------------------
-
-    filtered = []
-
-    for item in discovered.values():
-
-        url = item["url"]
-
-        # If URL explicitly contains another venue,
-        # don't include it.
-
-        if (
-            "/seat-layout/"
-            in url.lower()
-        ):
-
-            match = re.search(
-                r"/seat-layout/ET\d+/([^/]+)/(\d+)/",
-                url,
-                re.I
-            )
-
-            if match:
-
-                venue_from_url = (
-                    match.group(1)
-                )
-
-                if (
-                    venue_from_url.upper()
-                    != VENUE_CODE.upper()
-                ):
-
-                    continue
-
-        filtered.append(
-            item
-        )
-
-    # --------------------------------------------------------
-    # Sort by time
-    # --------------------------------------------------------
-
-    def sort_key(item):
-
-        time_value = item.get(
-            "show_time",
-            ""
-        )
-
-        return time_value
-
-    filtered.sort(
-        key=sort_key
-    )
-
-    # --------------------------------------------------------
-    # Print discovery
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 80)
-    print("DISCOVERED SHOWS")
-    print("=" * 80)
-
-    if not filtered:
+    if not responses:
 
         print(
-            "NO SHOWS DISCOVERED."
+            "No showtime response yet."
         )
 
-    for index, item in enumerate(
-        filtered,
+        print(
+            "Waiting additional 8 seconds..."
+        )
+
+        page.wait_for_timeout(
+            8000
+        )
+
+    # --------------------------------------------------------
+    # Parse all captured responses
+    # --------------------------------------------------------
+
+    results = {}
+
+    for data in responses:
+
+        walk_bms(
+            data,
+            {},
+            results
+        )
+
+    shows = list(
+        results.values()
+    )
+
+    # --------------------------------------------------------
+    # Clean/filter
+    # --------------------------------------------------------
+
+    final_shows = []
+
+    for show in shows:
+
+        # Require session ID
+        if not show["session_id"]:
+
+            continue
+
+        # If venue is known and not CSWO, skip
+        if (
+            show["venue_code"]
+            and
+            show["venue_code"]
+            != VENUE_CODE
+        ):
+
+            continue
+
+        # Format filter
+        if not format_allowed(
+            show["format"]
+        ):
+
+            continue
+
+        final_shows.append(
+            show
+        )
+
+    # --------------------------------------------------------
+    # Sort
+    # --------------------------------------------------------
+
+    final_shows.sort(
+        key=lambda x: (
+            x.get(
+                "format",
+                ""
+            ),
+            x.get(
+                "show_time",
+                ""
+            ),
+            x.get(
+                "session_id",
+                ""
+            )
+        )
+    )
+
+    # --------------------------------------------------------
+    # Print
+    # --------------------------------------------------------
+
+    banner(
+        "DISCOVERED CSWO SHOWS"
+    )
+
+    if not final_shows:
+
+        print(
+            "NO CSWO SHOWS DISCOVERED."
+        )
+
+        print()
+        print(
+            "Captured BMS responses:"
+            f" {len(responses)}"
+        )
+
+        return []
+
+    for i, show in enumerate(
+        final_shows,
         start=1
     ):
 
         print(
-            f"{index:02d}. "
-            f"{item['show_time'] or 'TIME UNKNOWN':<10} | "
-            f"{item['format'] or 'FORMAT UNKNOWN':<20} | "
-            f"Session {item['session_id']}"
+            f"{i:02d}. "
+            f"{show.get('show_time') or 'TIME ?':<10} | "
+            f"{show.get('format') or 'FORMAT ?':<20} | "
+            f"{show.get('language') or 'LANG ?':<25} | "
+            f"{show.get('event_code') or 'EVENT ?':<12} | "
+            f"{show['session_id']}"
         )
 
+    print()
     print(
-        f"\nTotal discovered: "
-        f"{len(filtered)}"
+        f"TOTAL CSWO SHOWS: "
+        f"{len(final_shows)}"
     )
 
-    print("=" * 80)
-
-    return filtered
+    return final_shows
 
 
 # ============================================================
-# SEAT TOKEN PARSER
+# SEAT TOKEN
+#
+# BMS convention confirmed from your working data:
+#
+# A1052+1 = AVAILABLE
+# A20515+9 = SOLD
+#
+# First numeric part:
+# 1xxxx = AVAILABLE
+# 2xxxx = SOLD
+#
+# Number after + = actual seat number.
 # ============================================================
 
-def parse_seat_token(token):
-
-    token = token.strip()
+def parse_seat_token(
+    token
+):
 
     if not token:
+
         return None
 
-    token = token.replace(
-        " ",
-        ""
+    token = (
+        str(token)
+        .strip()
+        .replace(" ", "")
     )
 
-    match = re.match(
-        r"^([A-Za-z])(\d+)\+(\d+)$",
+    match = re.fullmatch(
+        r"([A-Za-z])(\d+)\+(\d+)",
         token
     )
 
     if not match:
+
         return None
 
-    letter = match.group(1).upper()
+    letter = (
+        match.group(1)
+        .upper()
+    )
 
-    numeric_code = match.group(2)
+    code_number = (
+        match.group(2)
+    )
 
-    seat_number = match.group(3)
+    seat_number = (
+        match.group(3)
+    )
 
-    # No physical seat
-    if numeric_code == "0":
+    # A0 / B0 etc. are not seats
+    if code_number == "0":
+
         return None
 
-    if numeric_code.startswith("1"):
+    if code_number.startswith("1"):
 
         status = "AVAILABLE"
 
-    elif numeric_code.startswith("2"):
+    elif code_number.startswith("2"):
 
         status = "SOLD"
 
@@ -819,126 +1220,212 @@ def parse_seat_token(token):
 
     return {
         "seat_token": token,
-        "seat_code": f"{letter}{numeric_code}",
+        "seat_code": (
+            f"{letter}{code_number}"
+        ),
         "seat_number": seat_number,
         "status": status,
     }
 
 
 # ============================================================
-# BMS SEAT LAYOUT
+# GET SEAT LAYOUT
+#
+# Use the BMS seat-layout API with the event code belonging
+# to each individual format.
 # ============================================================
 
 def get_seat_layout(
-    session_id
+    page,
+    show
 ):
 
-    # --------------------------------------------------------
-    # This is the endpoint that was already working for us.
-    # --------------------------------------------------------
+    event_code = show[
+        "event_code"
+    ]
 
-    from curl_cffi import requests
+    session_id = show[
+        "session_id"
+    ]
 
     url = (
-        "https://services-in.bookmyshow.com/"
-        "doTrans.aspx"
+        "https://in.bookmyshow.com/"
+        "api/movies-data/seatlayout/v1/primary"
+        f"?eventCode={event_code}"
+        f"&dateCode={SHOW_DATE}"
+        f"&regionCode={REGION_CODE}"
+        f"&venueCode={VENUE_CODE}"
     )
 
-    payload = {
-        "strCommand": "GETSEATLAYOUT",
-        "strVenueCode": VENUE_CODE,
-        "strParam1": session_id,
-        "strParam2": "WEB",
-        "strParam5": "Y",
-        "strParam6": "Y",
-        "strParam7": "N",
-        "strFormat": "json",
-    }
+    # --------------------------------------------------------
+    # The session is required by BMS.
+    #
+    # The working seat-layout flow identifies the session
+    # through the selected show/session URL.
+    # --------------------------------------------------------
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/120.0.0.0 "
-            "Safari/537.36"
-        ),
-        "Accept": (
-            "application/json, text/plain, */*"
-        ),
-        "Content-Type": (
-            "application/x-www-form-urlencoded; "
-            "charset=UTF-8"
-        ),
-        "Origin": (
-            "https://in.bookmyshow.com"
-        ),
-        "Referer": (
-            MOVIE_PAGE
-        ),
-    }
+    seat_url = (
+        "https://in.bookmyshow.com/"
+        f"movies/{CITY}/seat-layout/"
+        f"{event_code}/"
+        f"{VENUE_CODE}/"
+        f"{session_id}/"
+        f"{SHOW_DATE}"
+    )
 
-    for attempt in range(
-        1,
-        4
+    print()
+    print(
+        f"Seat URL:\n{seat_url}"
+    )
+
+    try:
+
+        response = page.goto(
+            seat_url,
+            wait_until="domcontentloaded",
+            timeout=PAGE_TIMEOUT
+        )
+
+        if response:
+
+            print(
+                f"Seat page HTTP: "
+                f"{response.status}"
+            )
+
+    except Exception as error:
+
+        print(
+            f"Seat page navigation error: "
+            f"{error}"
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # Wait for seat API response
+    # --------------------------------------------------------
+
+    seat_response = None
+
+    def capture(
+        response
     ):
 
-        try:
+        nonlocal seat_response
 
-            print(
-                f"Seat layout attempt "
-                f"{attempt}/3"
-            )
+        response_url = (
+            response.url
+        )
 
-            response = requests.post(
-                url,
-                data=payload,
-                headers=headers,
-                impersonate="chrome120",
-                timeout=30
-            )
+        if (
+            "/api/movies-data/"
+            "seatlayout/v1/primary"
+            in response_url
+        ):
 
-            print(
-                f"HTTP status: "
-                f"{response.status_code}"
-            )
+            try:
 
-            if response.status_code != 200:
-
-                if attempt < 3:
-                    time.sleep(3)
-
-                continue
-
-            data = response.json()
-
-            bookmyshow = data.get(
-                "BookMyShow",
-                {}
-            )
-
-            str_data = bookmyshow.get(
-                "strData"
-            )
-
-            if str_data:
-
-                print(
-                    f"Seat layout received: "
-                    f"{len(str_data)} bytes"
+                seat_response = (
+                    response.json()
                 )
 
-                return str_data
+                print(
+                    "Seat layout JSON captured."
+                )
 
-        except Exception as error:
+            except Exception as error:
 
-            print(
-                f"Seat request error: "
-                f"{error}"
+                print(
+                    f"Seat JSON error: "
+                    f"{error}"
+                )
+
+    page.on(
+        "response",
+        capture
+    )
+
+    # Reload so listener is active before request
+    try:
+
+        page.reload(
+            wait_until="domcontentloaded",
+            timeout=PAGE_TIMEOUT
+        )
+
+    except Exception:
+
+        pass
+
+    page.wait_for_timeout(
+        5000
+    )
+
+    if not seat_response:
+
+        print(
+            "No seat-layout JSON captured."
+        )
+
+        return None
+
+    return seat_response
+
+
+# ============================================================
+# EXTRACT STRDATA FROM SEAT RESPONSE
+# ============================================================
+
+def find_strdata(
+    obj
+):
+
+    if isinstance(
+        obj,
+        dict
+    ):
+
+        for key, value in obj.items():
+
+            if str(
+                key
+            ).lower() == "strdata":
+
+                if isinstance(
+                    value,
+                    str
+                ):
+
+                    return value
+
+            if isinstance(
+                value,
+                (dict, list)
+            ):
+
+                found = find_strdata(
+                    value
+                )
+
+                if found:
+
+                    return found
+
+    elif isinstance(
+        obj,
+        list
+    ):
+
+        for item in obj:
+
+            found = find_strdata(
+                item
             )
 
-            if attempt < 3:
-                time.sleep(3)
+            if found:
+
+                return found
 
     return None
 
@@ -948,13 +1435,32 @@ def get_seat_layout(
 # ============================================================
 
 def parse_seat_layout(
-    str_data,
+    response_json,
     show
 ):
 
+    str_data = find_strdata(
+        response_json
+    )
+
     if not str_data:
 
+        print(
+            "ERROR: strData not found."
+        )
+
         return []
+
+    print(
+        f"strData length: "
+        f"{len(str_data)}"
+    )
+
+    # --------------------------------------------------------
+    # Existing working BMS structure:
+    #
+    # categories || seat rows
+    # --------------------------------------------------------
 
     sections = str_data.split(
         "||",
@@ -964,36 +1470,58 @@ def parse_seat_layout(
     if len(sections) != 2:
 
         print(
-            "Unable to split seat layout."
+            "Could not split BMS seat layout."
         )
 
         return []
 
-    category_section = sections[0]
+    category_section = (
+        sections[0]
+    )
 
-    seat_section = sections[1]
+    seat_section = (
+        sections[1]
+    )
 
-    categories = {}
+    category_map = {}
 
     # --------------------------------------------------------
-    # Category parser
+    # Categories
     # --------------------------------------------------------
 
-    for part in category_section.split("|"):
+    for item in (
+        category_section.split("|")
+    ):
 
-        part = part.strip()
+        item = item.strip()
 
-        if not part:
+        if not item:
+
             continue
 
-        pieces = part.split(":")
+        parts = item.split(
+            ":"
+        )
 
-        if len(pieces) < 2:
+        if len(parts) < 2:
+
             continue
 
-        categories[
-            pieces[1].strip()
-        ] = pieces[0].strip()
+        category_code = (
+            parts[0].strip()
+        )
+
+        category_name = (
+            parts[1].strip()
+        )
+
+        category_map[
+            category_code
+        ] = category_name
+
+    # --------------------------------------------------------
+    # Seats
+    # --------------------------------------------------------
 
     rows = []
 
@@ -1001,15 +1529,16 @@ def parse_seat_layout(
 
     sold = 0
 
-    # --------------------------------------------------------
-    # Seat rows
-    # --------------------------------------------------------
+    for raw_row in (
+        seat_section.split("|")
+    ):
 
-    for raw_row in seat_section.split("|"):
-
-        raw_row = raw_row.strip()
+        raw_row = (
+            raw_row.strip()
+        )
 
         if not raw_row:
+
             continue
 
         parts = raw_row.split(
@@ -1018,42 +1547,58 @@ def parse_seat_layout(
         )
 
         if len(parts) < 4:
+
             continue
 
-        row_number = parts[0].strip()
-
-        row_name = parts[1].strip()
-
-        category_code = parts[2].strip()
-
-        seat_data = parts[3].strip()
-
-        category = categories.get(
-            category_code,
-            category_code
+        row_number = (
+            parts[0].strip()
         )
 
-        for token in seat_data.split(":"):
+        row_name = (
+            parts[1].strip()
+        )
+
+        category_code = (
+            parts[2].strip()
+        )
+
+        seat_string = (
+            parts[3].strip()
+        )
+
+        category_name = (
+            category_map.get(
+                category_code,
+                category_code
+            )
+        )
+
+        for token in (
+            seat_string.split(":")
+        ):
 
             parsed = parse_seat_token(
                 token
             )
 
             if not parsed:
+
                 continue
 
-            if parsed["status"] == "SOLD":
-
-                sold += 1
-
-            else:
+            if (
+                parsed["status"]
+                == "AVAILABLE"
+            ):
 
                 available += 1
 
+            else:
+
+                sold += 1
+
             rows.append([
-                timestamp(),
+                now_ist(),
                 MOVIE_NAME,
-                EVENT_CODE,
                 CITY,
                 VENUE_CODE,
                 SHOW_DATE,
@@ -1066,30 +1611,53 @@ def parse_seat_layout(
                     ""
                 ),
                 show.get(
+                    "event_code",
+                    ""
+                ),
+                show.get(
                     "format",
+                    ""
+                ),
+                show.get(
+                    "language",
                     ""
                 ),
                 row_number,
                 row_name,
                 category_code,
-                category,
-                parsed["seat_token"],
-                parsed["seat_code"],
-                parsed["seat_number"],
-                parsed["status"],
+                category_name,
+                parsed[
+                    "seat_token"
+                ],
+                parsed[
+                    "seat_code"
+                ],
+                parsed[
+                    "seat_number"
+                ],
+                parsed[
+                    "status"
+                ],
             ])
 
+    print()
     print(
-        f"Seats: {len(rows)} | "
-        f"Sold: {sold} | "
-        f"Available: {available}"
+        f"SEATS: {len(rows)}"
+    )
+
+    print(
+        f"AVAILABLE: {available}"
+    )
+
+    print(
+        f"SOLD: {sold}"
     )
 
     return rows
 
 
 # ============================================================
-# SAVE SHOW DISCOVERY
+# SAVE SHOWS
 # ============================================================
 
 def save_shows(
@@ -1097,14 +1665,7 @@ def save_shows(
     shows
 ):
 
-    if not shows:
-        return
-
-    # --------------------------------------------------------
-    # We clear old discovery data so each run reflects
-    # current BMS sessions.
-    # --------------------------------------------------------
-
+    # Clear previous discovery result
     sheet.clear()
 
     sheet.update(
@@ -1112,14 +1673,17 @@ def save_shows(
         [SHOW_HEADERS]
     )
 
+    if not shows:
+
+        return
+
     rows = []
 
     for show in shows:
 
         rows.append([
-            timestamp(),
+            now_ist(),
             MOVIE_NAME,
-            EVENT_CODE,
             CITY,
             "CSWO",
             VENUE_CODE,
@@ -1130,6 +1694,10 @@ def save_shows(
             ),
             show.get(
                 "session_id",
+                ""
+            ),
+            show.get(
+                "event_code",
                 ""
             ),
             show.get(
@@ -1144,10 +1712,7 @@ def save_shows(
                 "screen",
                 ""
             ),
-            show.get(
-                "url",
-                ""
-            ),
+            BUY_TICKETS_URL,
         ])
 
     sheet.append_rows(
@@ -1156,7 +1721,7 @@ def save_shows(
     )
 
     print(
-        f"Saved {len(rows)} discovered shows."
+        f"Saved {len(rows)} shows."
     )
 
 
@@ -1170,11 +1735,8 @@ def save_seats(
 ):
 
     if not rows:
-        return
 
-    # --------------------------------------------------------
-    # One batch write.
-    # --------------------------------------------------------
+        return
 
     sheet.append_rows(
         rows,
@@ -1182,7 +1744,7 @@ def save_seats(
     )
 
     print(
-        f"Saved {len(rows)} seat records."
+        f"Saved {len(rows)} seat rows."
     )
 
 
@@ -1193,11 +1755,11 @@ def save_seats(
 def main():
 
     banner(
-        "BMS TOXIC CSWO SHOW DISCOVERY + SEAT TRACKER"
+        "BMS TOXIC CSWO ALL-SHOW TRACKER"
     )
 
     print(
-        f"Timestamp : {timestamp()}"
+        f"Timestamp : {now_ist()}"
     )
 
     print(
@@ -1205,7 +1767,7 @@ def main():
     )
 
     print(
-        f"Event     : {EVENT_CODE}"
+        f"City      : {CITY}"
     )
 
     print(
@@ -1214,10 +1776,6 @@ def main():
 
     print(
         f"Date      : {SHOW_DATE}"
-    )
-
-    print(
-        f"City      : {CITY}"
     )
 
     print(
@@ -1237,69 +1795,82 @@ def main():
 
     except Exception as error:
 
-        print(
-            f"Google Sheets error: {error}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Playwright
-    # --------------------------------------------------------
-
-    all_seats = []
-
-    with sync_playwright() as p:
-
         print()
         print(
-            "Launching Chromium..."
+            "GOOGLE SHEETS ERROR:"
         )
+
+        print(error)
+
+        raise
+
+    # --------------------------------------------------------
+    # Browser
+    # --------------------------------------------------------
+
+    with sync_playwright() as p:
 
         browser = p.chromium.launch(
             headless=True
         )
 
-        context = browser.new_context(
-            viewport={
-                "width": 1366,
-                "height": 900
-            },
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/120.0.0.0 "
-                "Safari/537.36"
+        context = (
+            browser.new_context(
+                viewport={
+                    "width": 1536,
+                    "height": 864,
+                },
+                locale="en-US",
+                timezone_id="Asia/Kolkata",
+                user_agent=(
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/151.0.0.0 "
+                    "Safari/537.36"
+                ),
             )
         )
 
-        page = context.new_page()
+        page = (
+            context.new_page()
+        )
 
         # ----------------------------------------------------
-        # DISCOVER
+        # STEP 1
+        # Discover all shows
         # ----------------------------------------------------
 
         shows = discover_shows(
             page
         )
 
-        # Save discovered sessions
         save_shows(
             show_sheet,
             shows
         )
 
+        if not shows:
+
+            browser.close()
+
+            banner(
+                "NO SHOWS FOUND - STOPPING"
+            )
+
+            return
+
         # ----------------------------------------------------
-        # Process every discovered show
+        # STEP 2
+        # Seat extraction
         # ----------------------------------------------------
 
         banner(
-            "PROCESSING DISCOVERED SHOWS"
+            "PROCESSING ALL DISCOVERED SHOWS"
         )
+
+        total_seat_rows = 0
 
         for index, show in enumerate(
             shows,
@@ -1307,6 +1878,10 @@ def main():
         ):
 
             print()
+            print(
+                "-" * 90
+            )
+
             print(
                 f"SHOW {index}/{len(shows)}"
             )
@@ -1322,77 +1897,87 @@ def main():
             )
 
             print(
+                f"Event   : "
+                f"{show.get('event_code', '')}"
+            )
+
+            print(
                 f"Session : "
                 f"{show.get('session_id', '')}"
             )
 
-            # ------------------------------------------------
-            # Seat layout
-            # ------------------------------------------------
-
-            str_data = get_seat_layout(
-                show["session_id"]
+            print(
+                "-" * 90
             )
 
-            if not str_data:
+            response_json = (
+                get_seat_layout(
+                    page,
+                    show
+                )
+            )
+
+            if not response_json:
 
                 print(
-                    "FAILED: No BMS seat layout."
+                    "FAILED: No seat layout."
                 )
 
                 continue
 
-            rows = parse_seat_layout(
-                str_data,
-                show
+            seat_rows = (
+                parse_seat_layout(
+                    response_json,
+                    show
+                )
             )
 
-            all_seats.extend(
-                rows
-            )
+            if seat_rows:
+
+                save_seats(
+                    seat_sheet,
+                    seat_rows
+                )
+
+                total_seat_rows += (
+                    len(seat_rows)
+                )
 
             if index < len(shows):
 
                 time.sleep(
-                    DELAY_BETWEEN_SESSIONS
+                    BETWEEN_SESSIONS_SECONDS
                 )
 
         browser.close()
 
     # --------------------------------------------------------
-    # Write seats once
+    # DONE
     # --------------------------------------------------------
 
     banner(
-        "WRITING ALL SEATS"
-    )
-
-    save_seats(
-        seat_sheet,
-        all_seats
-    )
-
-    # --------------------------------------------------------
-    # Final
-    # --------------------------------------------------------
-
-    banner(
-        "RUN COMPLETED"
+        "TRACKING COMPLETED"
     )
 
     print(
-        f"Shows discovered : {len(shows)}"
+        f"Shows discovered : "
+        f"{len(shows)}"
     )
 
     print(
-        f"Seat records     : {len(all_seats)}"
+        f"Seat rows saved  : "
+        f"{total_seat_rows}"
     )
 
     print(
         f"Format filter    : "
-        f"{FORMAT_FILTER if FORMAT_FILTER else 'ALL FORMATS'}"
+        f"{FORMAT_FILTER if FORMAT_FILTER else 'ALL'}"
     )
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
 
