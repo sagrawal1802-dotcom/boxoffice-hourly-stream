@@ -1,24 +1,20 @@
 import json
 import re
 import time
-from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+
 from playwright.sync_api import sync_playwright
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-MOVIE = "Toxic: A Fairy Tale for Grown-ups"
-
-CITY = "mumbai"
-REGION_CODE = "MUMBAI"
-DATE_CODE = "20260826"
 
 MOVIE_URL = (
     "https://in.bookmyshow.com/movies/mumbai/"
     "toxic-a-fairy-tale-for-grown-ups/ET00379311"
 )
+
+CITY = "mumbai"
+REGION = "MUMBAI"
+DATE_CODE = "20260826"
 
 EVENT_CODES = [
     "ET00379311",
@@ -26,13 +22,12 @@ EVENT_CODES = [
     "ET00513506",
 ]
 
-OUTPUT_FILE = "cinepolis_mumbai_discovery.json"
-RAW_FILE = "bms_captured_showtime_responses.json"
+OUTPUT_DIR = Path("bms_capture")
+OUTPUT_DIR.mkdir(exist_ok=True)
 
+captured = []
+interesting = []
 
-# ============================================================
-# HELPERS
-# ============================================================
 
 def banner(text):
     print()
@@ -41,410 +36,328 @@ def banner(text):
     print("=" * 100)
 
 
-def clean(value):
-    if value is None:
-        return ""
-
-    if isinstance(value, (dict, list)):
-        return value
-
-    return re.sub(r"\s+", " ", str(value)).strip()
+def safe_filename(text):
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+    return text[:180]
 
 
-def is_cinepolis(value):
-    if not isinstance(value, str):
-        return False
+def looks_interesting(url, content_type, body):
+    """
+    We intentionally do NOT depend on one specific BMS endpoint.
 
-    text = value.lower()
+    Search broadly for:
+    - showtime
+    - cinema
+    - venue
+    - Cinepolis
+    - Toxic
+    - ET event codes
+    - region
+    """
 
-    return (
-        "cinepolis" in text
-        or "cinépolis" in text
+    combined = (
+        url.lower()
+        + "\n"
+        + content_type.lower()
+        + "\n"
+        + body[:500000].lower()
     )
 
+    keywords = [
+        "cinepolis",
+        "showtime",
+        "showtimes",
+        "cinema",
+        "venue",
+        "toxic",
+        "et00379311",
+        "et00513458",
+        "et00513506",
+        "mumbai",
+    ]
 
-# ============================================================
-# FIND CINEPOLIS IN ANY JSON STRUCTURE
-# ============================================================
-
-def scan_json_for_cinepolis(obj, path="root", results=None):
-
-    if results is None:
-        results = []
-
-    if isinstance(obj, dict):
-
-        # Check whether this object itself contains Cinepolis.
-        object_text = []
-
-        for key, value in obj.items():
-
-            if isinstance(value, str):
-                object_text.append(value)
-
-        joined = " | ".join(object_text)
-
-        if is_cinepolis(joined):
-
-            results.append({
-                "path": path,
-                "object": obj
-            })
-
-        for key, value in obj.items():
-
-            scan_json_for_cinepolis(
-                value,
-                f"{path}.{key}",
-                results
-            )
-
-    elif isinstance(obj, list):
-
-        for index, value in enumerate(obj):
-
-            scan_json_for_cinepolis(
-                value,
-                f"{path}[{index}]",
-                results
-            )
-
-    return results
+    return any(k in combined for k in keywords)
 
 
-# ============================================================
-# EXTRACT VENUE-LIKE OBJECTS
-# ============================================================
+def save_response(index, url, content_type, body):
+    parsed = urlparse(url)
 
-def extract_properties(obj, event_code="", path="root"):
+    filename = (
+        f"{index:04d}_"
+        f"{safe_filename(parsed.netloc)}_"
+        f"{safe_filename(parsed.path)}"
+    )
+
+    if not filename.endswith(".txt"):
+        filename += ".txt"
+
+    path = OUTPUT_DIR / filename
+
+    try:
+        path.write_text(body, encoding="utf-8", errors="ignore")
+    except Exception:
+        pass
+
+    return str(path)
+
+
+def extract_strings(body):
+    """
+    Extract useful human-readable strings from JSON/text.
+    """
+
+    results = set()
+
+    patterns = [
+        r"Cinepolis[^\"<]{0,150}",
+        r"cinema[^\"<]{0,150}",
+        r"venue[^\"<]{0,150}",
+        r"ET\d{8}",
+        r"[A-Za-z0-9 .&'()-]{0,100}Cinepolis[A-Za-z0-9 .&'()-]{0,100}",
+    ]
+
+    for pattern in patterns:
+        try:
+            for match in re.findall(pattern, body, flags=re.I):
+                cleaned = re.sub(r"\s+", " ", match).strip()
+
+                if cleaned:
+                    results.add(cleaned[:300])
+        except Exception:
+            pass
+
+    return sorted(results)
+
+
+def inspect_json(body):
+    """
+    Recursively walk JSON and identify objects that look like:
+    cinema / venue / property / showtime records.
+    """
 
     found = []
 
-    if isinstance(obj, dict):
+    try:
+        data = json.loads(body)
+    except Exception:
+        return found
 
-        # Collect all string values.
-        strings = {}
+    def walk(obj, path="root"):
+        if isinstance(obj, dict):
 
-        for key, value in obj.items():
-
-            if isinstance(value, str):
-                strings[key] = clean(value)
-
-        cinepolis_fields = []
-
-        for key, value in strings.items():
-
-            if is_cinepolis(value):
-                cinepolis_fields.append((key, value))
-
-        if cinepolis_fields:
-
-            record = {
-                "event_code": event_code,
-                "venue_name": "",
-                "venue_code": "",
-                "address": "",
-                "format": "",
-                "language": "",
-                "session_id": "",
-                "time": "",
-                "path": path,
+            keys_lower = {
+                str(k).lower(): k
+                for k in obj.keys()
             }
 
-            # ------------------------------------------------
-            # Venue name
-            # ------------------------------------------------
-
-            name_keys = [
-                "venueName",
-                "venue_name",
-                "cinemaName",
-                "cinema_name",
-                "theatreName",
-                "theatre_name",
-                "name",
-                "displayName",
-                "display_name",
-                "title",
+            interesting_keys = [
+                "cinema",
+                "cinemacode",
+                "cinemaname",
+                "venue",
+                "venuename",
+                "venuecode",
+                "property",
+                "propertyname",
+                "propertycode",
+                "audi",
+                "audiid",
+                "showtime",
+                "showtimes",
+                "eventcode",
+                "event_code",
             ]
 
-            for key in name_keys:
-
-                if key in strings:
-
-                    if is_cinepolis(strings[key]):
-
-                        record["venue_name"] = strings[key]
-                        break
-
-            # If no obvious venue-name field, use the
-            # Cinepolis-containing value.
-            if not record["venue_name"]:
-
-                record["venue_name"] = cinepolis_fields[0][1]
-
-            # ------------------------------------------------
-            # Venue code
-            # ------------------------------------------------
-
-            code_keys = [
-                "venueCode",
-                "venue_code",
-                "cinemaCode",
-                "cinema_code",
-                "theatreCode",
-                "theatre_code",
-                "code",
-                "id",
+            matched = [
+                keys_lower[k]
+                for k in interesting_keys
+                if k in keys_lower
             ]
 
-            for key in code_keys:
+            if matched:
+                record = {
+                    "_path": path,
+                    "_matched_keys": [str(x) for x in matched],
+                }
 
-                if key in strings:
+                for key in matched:
+                    try:
+                        value = obj[key]
 
-                    record["venue_code"] = strings[key]
-                    break
+                        if isinstance(value, (str, int, float, bool)):
+                            record[str(key)] = value
+                        elif isinstance(value, list):
+                            record[str(key)] = value[:10]
+                        elif isinstance(value, dict):
+                            record[str(key)] = value
+                    except Exception:
+                        pass
 
-            # ------------------------------------------------
-            # Address
-            # ------------------------------------------------
+                found.append(record)
 
-            address_keys = [
-                "address",
-                "venueAddress",
-                "venue_address",
-                "cinemaAddress",
-                "cinema_address",
-                "theatreAddress",
-                "theatre_address",
-            ]
+            for key, value in obj.items():
+                walk(value, f"{path}.{key}")
 
-            for key in address_keys:
+        elif isinstance(obj, list):
+            for i, value in enumerate(obj):
+                walk(value, f"{path}[{i}]")
 
-                if key in strings:
-
-                    record["address"] = strings[key]
-                    break
-
-            # ------------------------------------------------
-            # Format
-            # ------------------------------------------------
-
-            format_keys = [
-                "format",
-                "formatName",
-                "format_name",
-                "screenFormat",
-                "screen_format",
-                "languageFormat",
-                "language_format",
-            ]
-
-            for key in format_keys:
-
-                if key in strings:
-
-                    record["format"] = strings[key]
-                    break
-
-            # ------------------------------------------------
-            # Language
-            # ------------------------------------------------
-
-            language_keys = [
-                "language",
-                "languageName",
-                "language_name",
-            ]
-
-            for key in language_keys:
-
-                if key in strings:
-
-                    record["language"] = strings[key]
-                    break
-
-            # ------------------------------------------------
-            # Session
-            # ------------------------------------------------
-
-            session_keys = [
-                "sessionId",
-                "session_id",
-                "sessionCode",
-                "session_code",
-            ]
-
-            for key in session_keys:
-
-                if key in strings:
-
-                    record["session_id"] = strings[key]
-                    break
-
-            # ------------------------------------------------
-            # Time
-            # ------------------------------------------------
-
-            time_keys = [
-                "showTime",
-                "show_time",
-                "startTime",
-                "start_time",
-                "time",
-            ]
-
-            for key in time_keys:
-
-                if key in strings:
-
-                    record["time"] = strings[key]
-                    break
-
-            found.append(record)
-
-        # Continue recursively.
-
-        for key, value in obj.items():
-
-            found.extend(
-                extract_properties(
-                    value,
-                    event_code,
-                    f"{path}.{key}"
-                )
-            )
-
-    elif isinstance(obj, list):
-
-        for index, value in enumerate(obj):
-
-            found.extend(
-                extract_properties(
-                    value,
-                    event_code,
-                    f"{path}[{index}]"
-                )
-            )
+    walk(data)
 
     return found
 
 
-# ============================================================
-# NETWORK RESPONSE HANDLER
-# ============================================================
+def record_response(response):
+    url = response.url
 
-def capture_response(response, captured):
+    # Only BMS responses are relevant.
+    if "bookmyshow.com" not in url.lower():
+        return
+
+    request = response.request
+    resource_type = request.resource_type
+
+    # Ignore obvious static assets.
+    ignored_extensions = (
+        ".js",
+        ".css",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".ico",
+        ".webp",
+    )
+
+    lower_url = url.lower()
+
+    if any(lower_url.split("?")[0].endswith(ext) for ext in ignored_extensions):
+        return
 
     try:
+        content_type = response.headers.get("content-type", "")
+    except Exception:
+        content_type = ""
 
-        url = response.url
+    # We care primarily about API/XHR/fetch/document responses.
+    if resource_type not in (
+        "xhr",
+        "fetch",
+        "document",
+    ):
+        return
 
-        # Only inspect BMS responses.
-        if "bookmyshow.com" not in url:
-            return
+    try:
+        body = response.text()
+    except Exception:
+        return
 
-        resource_type = response.request.resource_type
+    if not body:
+        return
 
-        # Showtime API is normally XHR/fetch.
-        if resource_type not in [
-            "xhr",
-            "fetch",
-            "document",
-        ]:
-            return
+    index = len(captured) + 1
 
-        # We are especially interested in these.
-        interesting = (
-            "showtimes" in url.lower()
-            or "primary-dynamic" in url.lower()
-            or "movies-data" in url.lower()
-            or "event" in url.lower()
+    entry = {
+        "index": index,
+        "status": response.status,
+        "resource_type": resource_type,
+        "url": url,
+        "content_type": content_type,
+        "size": len(body),
+    }
+
+    captured.append(entry)
+
+    print()
+    print("[BMS RESPONSE]")
+    print("Index :", index)
+    print("Status:", response.status)
+    print("Type  :", resource_type)
+    print("Size  :", len(body))
+    print("URL   :", url[:500])
+
+    # Save ALL useful BMS responses, not just Cinepolis ones.
+    path = save_response(
+        index,
+        url,
+        content_type,
+        body,
+    )
+
+    entry["saved_file"] = path
+
+    if looks_interesting(url, content_type, body):
+
+        print(">>> INTERESTING RESPONSE <<<")
+
+        entry["interesting"] = True
+
+        strings = extract_strings(body)
+
+        if strings:
+            print("Useful strings:")
+
+            for value in strings[:50]:
+                print("  ", value)
+
+        json_records = inspect_json(body)
+
+        if json_records:
+            print(
+                "Potential structured records:",
+                len(json_records),
+            )
+
+        interesting.append(
+            {
+                "response": entry,
+                "strings": strings[:200],
+                "json_records": json_records[:500],
+            }
         )
 
-        if not interesting:
-            return
+    else:
+        entry["interesting"] = False
 
-        print()
-        print("[NETWORK]")
-        print("Status :", response.status)
-        print("Type   :", resource_type)
-        print("URL    :", url)
-
-        try:
-
-            body = response.text()
-
-        except Exception as e:
-
-            print("Could not read response:", repr(e))
-            return
-
-        print("Size   :", len(body))
-
-        if not body:
-            return
-
-        # Don't store Cloudflare HTML.
-        if body.lstrip().startswith("<!DOCTYPE"):
-            print("Skipped HTML/Cloudflare response.")
-            return
-
-        try:
-
-            data = json.loads(body)
-
-        except Exception:
-
-            print("Response is not JSON.")
-            return
-
-        captured.append({
-            "timestamp": datetime.now().isoformat(),
-            "url": url,
-            "status": response.status,
-            "resource_type": resource_type,
-            "data": data,
-        })
-
-        print("JSON CAPTURED")
-
-    except Exception as e:
-
-        print("Response handler error:", repr(e))
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
 
-    banner("BMS TOXIC - MUMBAI CINEPOLIS PROPERTY DISCOVERY")
+    banner(
+        "BMS TOXIC - MUMBAI CINEPOLIS "
+        "NETWORK DISCOVERY"
+    )
 
-    print("Movie      :", MOVIE)
-    print("City       :", CITY)
-    print("Region     :", REGION_CODE)
-    print("Date       :", DATE_CODE)
-    print("Event codes:", ", ".join(EVENT_CODES))
+    print("Movie URL :", MOVIE_URL)
+    print("City      :", CITY)
+    print("Region    :", REGION)
+    print("Date      :", DATE_CODE)
+    print("Events    :", ", ".join(EVENT_CODES))
 
     print()
-    print("IMPORTANT:")
-    print("This version does NOT directly request the BMS API.")
-    print("It captures responses generated by the BMS webpage.")
+    print("IMPORTANT")
+    print("This diagnostic version:")
+    print("- Does NOT use Google Sheets")
+    print("- Does NOT use credentials.json")
+    print("- Does NOT use the seat API")
+    print("- Does NOT modify your existing tracker")
+    print("- Does NOT directly request the BMS showtime API")
+    print("- Captures BMS webpage network responses")
 
-    captured = []
+    banner("LAUNCHING CHROMIUM")
 
     with sync_playwright() as p:
-
-        banner("LAUNCHING CHROMIUM")
 
         browser = p.chromium.launch(
             headless=True,
             args=[
+                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
+                "--disable-gpu",
             ],
         )
 
@@ -464,21 +377,10 @@ def main():
 
         page = context.new_page()
 
-        # ----------------------------------------------------
-        # Capture all relevant network responses.
-        # ----------------------------------------------------
-
         page.on(
             "response",
-            lambda response: capture_response(
-                response,
-                captured
-            )
+            lambda response: record_response(response)
         )
-
-        # ----------------------------------------------------
-        # Open movie page.
-        # ----------------------------------------------------
 
         banner("OPENING TOXIC MUMBAI PAGE")
 
@@ -491,423 +393,415 @@ def main():
             )
 
             if response:
-
                 print(
                     "Movie page HTTP status:",
-                    response.status
+                    response.status,
+                )
+            else:
+                print(
+                    "Movie page returned no response object."
                 )
 
         except Exception as e:
 
             print(
                 "Movie page navigation error:",
-                repr(e)
+                repr(e),
             )
 
-        print()
-        print("Waiting for BMS JavaScript...")
-        time.sleep(10)
+        banner("WAITING FOR BMS JAVASCRIPT")
 
-        # ----------------------------------------------------
-        # Scroll.
-        # ----------------------------------------------------
+        time.sleep(8)
+
+        banner("INITIAL PAGE INFORMATION")
+
+        try:
+            print("Title:", page.title())
+        except Exception:
+            pass
+
+        try:
+            print("Current URL:", page.url)
+        except Exception:
+            pass
+
+        try:
+            print(
+                "Page HTML size:",
+                len(page.content()),
+            )
+        except Exception:
+            pass
 
         banner("SCROLLING BMS PAGE")
 
-        for i in range(8):
+        for i in range(1, 16):
+
+            print(
+                f"Scroll {i}/15"
+            )
+
+            try:
+                page.mouse.wheel(
+                    0,
+                    1000,
+                )
+            except Exception:
+                pass
+
+            time.sleep(2)
+
+        banner("WAITING FOR DELAYED BMS RESPONSES")
+
+        time.sleep(10)
+
+        banner("CLICKING POSSIBLE SHOWTIME CONTROLS")
+
+        # Try harmless clicks on text that may expose the
+        # cinema/showtime section.
+        click_texts = [
+            "Book Tickets",
+            "Book ticket",
+            "Showtimes",
+            "SHOWTIMES",
+            "View All",
+            "View all",
+        ]
+
+        for text in click_texts:
 
             try:
 
-                page.mouse.wheel(
-                    0,
-                    2500
+                locator = page.get_by_text(
+                    text,
+                    exact=True,
                 )
+
+                count = locator.count()
+
+                if count:
+
+                    print(
+                        f"Found clickable text: {text} "
+                        f"({count})"
+                    )
+
+                    for j in range(min(count, 2)):
+
+                        try:
+
+                            locator.nth(j).click(
+                                timeout=3000
+                            )
+
+                            print(
+                                "Clicked:",
+                                text,
+                            )
+
+                            time.sleep(4)
+
+                        except Exception:
+                            pass
 
             except Exception:
                 pass
 
+        banner("SECOND SCROLL PASS")
+
+        for i in range(1, 11):
+
             print(
-                f"Scroll {i + 1}/8"
+                f"Second scroll {i}/10"
             )
 
-            time.sleep(1.5)
+            try:
+                page.mouse.wheel(
+                    0,
+                    1200,
+                )
+            except Exception:
+                pass
 
-        # ----------------------------------------------------
-        # Wait for delayed requests.
-        # ----------------------------------------------------
+            time.sleep(2)
 
-        print()
-        print(
-            "Waiting for delayed BMS responses..."
-        )
+        banner("FINAL WAIT")
 
         time.sleep(10)
 
-        # ----------------------------------------------------
-        # If the page didn't trigger showtime API,
-        # navigate to each event's buy-ticket page.
-        # ----------------------------------------------------
+        banner("PAGE TEXT SEARCH")
 
-        if len(captured) == 0:
+        try:
 
-            banner(
-                "NO SHOWTIME RESPONSE YET - "
-                "OPENING EVENT PAGES"
+            text = page.locator("body").inner_text(
+                timeout=10000
             )
 
-            for event_code in EVENT_CODES:
+            print(
+                "Visible text size:",
+                len(text),
+            )
 
-                event_url = (
-                    "https://in.bookmyshow.com/movies/mumbai/"
-                    "toxic-a-fairy-tale-for-grown-ups/"
-                    f"buytickets/{event_code}/"
-                    f"{DATE_CODE}"
-                    "?etCodes=*"
-                    "&language=hindi"
-                    f"&refEventCode={event_code}"
+            lower = text.lower()
+
+            terms = [
+                "cinepolis",
+                "toxic",
+                "showtimes",
+                "cinema",
+                "mumbai",
+            ]
+
+            for term in terms:
+
+                count = lower.count(term)
+
+                print(
+                    f"{term}: {count}"
                 )
+
+            if "cinepolis" in lower:
 
                 print()
                 print(
-                    "Opening:",
-                    event_code
+                    "CINEPOLIS TEXT WAS FOUND "
+                    "ON THE RENDERED PAGE."
                 )
 
-                try:
+                positions = []
 
-                    response = page.goto(
-                        event_url,
-                        wait_until="domcontentloaded",
-                        timeout=60000,
+                start = 0
+
+                while True:
+
+                    pos = lower.find(
+                        "cinepolis",
+                        start,
                     )
 
-                    if response:
+                    if pos == -1:
+                        break
 
-                        print(
-                            "HTTP status:",
-                            response.status
-                        )
+                    positions.append(pos)
 
-                except Exception as e:
+                    start = pos + 1
+
+                    if len(positions) >= 20:
+                        break
+
+                for pos in positions:
+
+                    begin = max(
+                        0,
+                        pos - 250,
+                    )
+
+                    end = min(
+                        len(text),
+                        pos + 500,
+                    )
+
+                    print()
+                    print(
+                        "----- Cinepolis context -----"
+                    )
 
                     print(
-                        "Navigation error:",
-                        repr(e)
+                        text[begin:end]
                     )
 
-                time.sleep(8)
+        except Exception as e:
 
-                for i in range(4):
+            print(
+                "Page text extraction error:",
+                repr(e),
+            )
 
-                    try:
-                        page.mouse.wheel(
-                            0,
-                            2500
-                        )
-                    except Exception:
-                        pass
+        banner("CAPTURE SUMMARY")
 
-                    time.sleep(1)
+        print(
+            "Total BMS responses captured:",
+            len(captured),
+        )
 
-                time.sleep(5)
+        print(
+            "Interesting responses:",
+            len(interesting),
+        )
 
-        # ----------------------------------------------------
-        # Final wait.
-        # ----------------------------------------------------
+        print(
+            "Raw response directory:",
+            str(OUTPUT_DIR),
+        )
 
-        time.sleep(5)
+        # Save master response index.
+        with open(
+            "bms_network_index.json",
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            json.dump(
+                captured,
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        # Save interesting responses.
+        with open(
+            "bms_interesting_responses.json",
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            json.dump(
+                interesting,
+                f,
+                indent=2,
+                ensure_ascii=False,
+                default=str,
+            )
+
+        # Save cookies because they may be useful for
+        # understanding the successful BMS session.
+        try:
+
+            cookies = context.cookies()
+
+            with open(
+                "bms_cookies.json",
+                "w",
+                encoding="utf-8",
+            ) as f:
+
+                json.dump(
+                    cookies,
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+
+            print(
+                "Cookies saved: bms_cookies.json"
+            )
+
+        except Exception as e:
+
+            print(
+                "Could not save cookies:",
+                repr(e),
+            )
+
+        banner("CINEPOLIS SEARCH")
+
+        cinepolis_results = []
+
+        for item in interesting:
+
+            strings = item.get(
+                "strings",
+                [],
+            )
+
+            for value in strings:
+
+                if "cinepolis" in value.lower():
+
+                    cinepolis_results.append(
+                        {
+                            "response_index":
+                                item["response"]["index"],
+                            "url":
+                                item["response"]["url"],
+                            "value":
+                                value,
+                        }
+                    )
+
+        if cinepolis_results:
+
+            print(
+                "Cinepolis references found:",
+                len(cinepolis_results),
+            )
+
+            for item in cinepolis_results:
+
+                print()
+                print(
+                    "Response:",
+                    item["response_index"],
+                )
+
+                print(
+                    "URL:",
+                    item["url"][:500],
+                )
+
+                print(
+                    "VALUE:",
+                    item["value"],
+                )
+
+        else:
+
+            print(
+                "NO CINEPOLIS STRING FOUND "
+                "IN CAPTURED BMS RESPONSES."
+            )
+
+        # Save Cinepolis-only search results.
+        with open(
+            "cinepolis_search_results.json",
+            "w",
+            encoding="utf-8",
+        ) as f:
+
+            json.dump(
+                cinepolis_results,
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        banner("FINAL FILES")
+
+        print(
+            "1. bms_network_index.json"
+        )
+
+        print(
+            "2. bms_interesting_responses.json"
+        )
+
+        print(
+            "3. bms_cookies.json"
+        )
+
+        print(
+            "4. cinepolis_search_results.json"
+        )
+
+        print(
+            "5. bms_capture/"
+        )
+
+        print()
+        print(
+            "DO NOT BUILD THE SHOW SCRAPER YET."
+        )
+
+        print(
+            "First inspect the captured BMS responses."
+        )
+
+        print(
+            "The next version will be built from "
+            "the actual response structure."
+        )
 
         browser.close()
-
-    # ========================================================
-    # SAVE RAW CAPTURE
-    # ========================================================
-
-    banner("CAPTURE SUMMARY")
-
-    print(
-        "Captured BMS JSON responses:",
-        len(captured)
-    )
-
-    with open(
-        RAW_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            captured,
-            f,
-            indent=2,
-            ensure_ascii=False
-        )
-
-    print(
-        "Saved raw responses:",
-        RAW_FILE
-    )
-
-    # ========================================================
-    # SEARCH FOR CINEPOLIS
-    # ========================================================
-
-    banner("SEARCHING CAPTURED BMS DATA")
-
-    all_records = []
-
-    all_cinepolis_strings = set()
-
-    for index, item in enumerate(captured, 1):
-
-        event_code = ""
-
-        url = item.get("url", "")
-
-        for code in EVENT_CODES:
-
-            if code in url:
-
-                event_code = code
-                break
-
-        data = item.get("data")
-
-        # ----------------------------------------------------
-        # Find every Cinepolis occurrence.
-        # ----------------------------------------------------
-
-        matches = scan_json_for_cinepolis(
-            data
-        )
-
-        print()
-        print(
-            f"Response {index}: "
-            f"Cinepolis matches = {len(matches)}"
-        )
-
-        for match in matches:
-
-            obj = match.get("object", {})
-
-            for key, value in obj.items():
-
-                if isinstance(value, str):
-
-                    if is_cinepolis(value):
-
-                        all_cinepolis_strings.add(
-                            clean(value)
-                        )
-
-        # ----------------------------------------------------
-        # Extract possible venue records.
-        # ----------------------------------------------------
-
-        records = extract_properties(
-            data,
-            event_code
-        )
-
-        all_records.extend(records)
-
-        print(
-            "Potential venue records:",
-            len(records)
-        )
-
-    # ========================================================
-    # PRINT CINEPOLIS STRINGS
-    # ========================================================
-
-    banner("CINEPOLIS TEXT FOUND")
-
-    if all_cinepolis_strings:
-
-        for value in sorted(
-            all_cinepolis_strings
-        ):
-
-            print(value)
-
-    else:
-
-        print(
-            "No Cinepolis text found in captured JSON."
-        )
-
-    # ========================================================
-    # DEDUPLICATE VENUES
-    # ========================================================
-
-    unique = {}
-
-    for record in all_records:
-
-        name = clean(
-            record.get("venue_name")
-        )
-
-        if not name:
-            continue
-
-        if not is_cinepolis(name):
-            continue
-
-        code = clean(
-            record.get("venue_code")
-        )
-
-        key = (
-            name.lower(),
-            code
-        )
-
-        if key not in unique:
-
-            unique[key] = record
-
-    properties = list(
-        unique.values()
-    )
-
-    # ========================================================
-    # PRINT PROPERTIES
-    # ========================================================
-
-    banner(
-        "CINEPOLIS PROPERTIES FOUND IN MUMBAI"
-    )
-
-    if not properties:
-
-        print(
-            "NO CINEPOLIS VENUE RECORDS FOUND."
-        )
-
-        print()
-        print(
-            "Raw BMS responses have been saved."
-        )
-
-        print(
-            "File:",
-            RAW_FILE
-        )
-
-        print()
-        print(
-            "Captured responses:",
-            len(captured)
-        )
-
-    else:
-
-        for index, record in enumerate(
-            properties,
-            1
-        ):
-
-            print()
-            print(
-                f"[{index}] "
-                f"{record.get('venue_name', '')}"
-            )
-
-            print(
-                "    Venue Code :",
-                record.get(
-                    "venue_code",
-                    ""
-                )
-            )
-
-            print(
-                "    Address    :",
-                record.get(
-                    "address",
-                    ""
-                )
-            )
-
-            print(
-                "    Event Code :",
-                record.get(
-                    "event_code",
-                    ""
-                )
-            )
-
-            print(
-                "    Format     :",
-                record.get(
-                    "format",
-                    ""
-                )
-            )
-
-            print(
-                "    Language   :",
-                record.get(
-                    "language",
-                    ""
-                )
-            )
-
-    # ========================================================
-    # SAVE DISCOVERY RESULT
-    # ========================================================
-
-    output = {
-        "timestamp": datetime.now().isoformat(),
-        "movie": MOVIE,
-        "city": CITY,
-        "region": REGION_CODE,
-        "date": DATE_CODE,
-        "event_codes": EVENT_CODES,
-        "captured_responses": len(captured),
-        "cinepolis_strings": sorted(
-            all_cinepolis_strings
-        ),
-        "properties": properties,
-        "property_count": len(properties),
-    }
-
-    with open(
-        OUTPUT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            output,
-            f,
-            indent=2,
-            ensure_ascii=False
-        )
-
-    banner("DISCOVERY COMPLETED")
-
-    print(
-        "Cinepolis properties:",
-        len(properties)
-    )
-
-    print(
-        "Captured responses:",
-        len(captured)
-    )
-
-    print(
-        "Raw file:",
-        RAW_FILE
-    )
-
-    print(
-        "Discovery file:",
-        OUTPUT_FILE
-    )
 
 
 if __name__ == "__main__":
