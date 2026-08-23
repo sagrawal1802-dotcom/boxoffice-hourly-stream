@@ -1,97 +1,28 @@
-name: BMS Toxic CSWO Tracker
+name: Toxic Cinepolis Mumbai Discovery
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-tracker:
+  discover:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - name: Install Python Dependencies
+      - name: Install Playwright
         run: |
           python -m pip install --upgrade pip
           pip install playwright
-          pip install gspread
-          pip install google-auth
-          pip install pytz
-          pip install curl_cffi
-
-      - name: Install Playwright Chromium
-        run: |
           python -m playwright install chromium
           python -m playwright install-deps chromium
 
-      - name: Verify Python Environment
-        run: |
-          python --version
-          python -c "import playwright; print('Playwright OK')"
-          python -c "import gspread; print('gspread OK')"
-          python -c "import google.auth; print('Google Auth OK')"
-          python -c "import pytz; print('pytz OK')"
-          python -c "import curl_cffi; print('curl_cffi OK')"
-
-      - name: Create Google credentials file
-        env:
-          GCP_SA_KEY_B64: ${{ secrets.GCP_SA_KEY_B64 }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
-        run: |
-          if [ -n "$GCP_SA_KEY_B64" ]; then
-            echo "Using GCP_SA_KEY_B64..."
-            echo "$GCP_SA_KEY_B64" | base64 --decode > credentials.json
-          elif [ -n "$GCP_SA_KEY" ]; then
-            echo "Using GCP_SA_KEY..."
-            printf '%s' "$GCP_SA_KEY" > credentials.json
-          else
-            echo "ERROR: No Google service account secret found."
-            exit 1
-          fi
-
-          if [ ! -s credentials.json ]; then
-            echo "ERROR: credentials.json is empty."
-            exit 1
-          fi
-
-          echo "Google credentials file created."
-
-          python - <<'PY'
-          import json
-
-          with open("credentials.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          required = [
-              "type",
-              "project_id",
-              "private_key",
-              "client_email"
-          ]
-
-          missing = [x for x in required if not data.get(x)]
-
-          if missing:
-              raise SystemExit(
-                  "ERROR: Missing Google credential fields: "
-                  + ", ".join(missing)
-              )
-
-          print("Google credentials JSON is valid.")
-          print("Service account credentials detected.")
-          PY
-
-      - name: Run BMS Tracker
-        env:
-          SPREADSHEET_ID: "1zzp8T0ergvrIcyqutlLTh6bzO2CBwfWT9xoaAMaCOO4"
-          GCP_SA_KEY_B64: ${{ secrets.GCP_SA_KEY_B64 }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+      - name: Run Cinepolis Discovery
         run: |
           python tracker.py
